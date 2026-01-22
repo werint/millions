@@ -350,6 +350,8 @@ class ChannelPermissions:
             logger.warning(f"⚠️ Нет настроек сервера для настройки прав роли {role.name}")
             return
         
+        configured_count = 0
+        
         # 1. News - только читать
         if settings.get('news_channel_id'):
             news_channel = guild.get_channel(int(settings['news_channel_id']))
@@ -361,6 +363,7 @@ class ChannelPermissions:
                     read_message_history=True
                 )
                 logger.info(f"✅ Добавлен доступ к news для роли {role.name} (только чтение)")
+                configured_count += 1
         
         # 2. Flood - читать и писать
         if settings.get('flood_channel_id'):
@@ -373,6 +376,7 @@ class ChannelPermissions:
                     read_message_history=True
                 )
                 logger.info(f"✅ Добавлен доступ к flood для роли {role.name} (чтение/запись)")
+                configured_count += 1
         
         # 3. Tags - только читать
         if settings.get('tags_channel_id'):
@@ -385,6 +389,7 @@ class ChannelPermissions:
                     read_message_history=True
                 )
                 logger.info(f"✅ Добавлен доступ к tags для роли {role.name} (только чтение)")
+                configured_count += 1
         
         # 4. Media - читать и писать
         if settings.get('media_channel_id'):
@@ -398,6 +403,7 @@ class ChannelPermissions:
                     attach_files=True
                 )
                 logger.info(f"✅ Добавлен доступ к media для роли {role.name} (чтение/запись)")
+                configured_count += 1
         
         # 5. Голосовые каналы - подключаться и говорить
         if settings.get('voice_channel_ids'):
@@ -413,9 +419,12 @@ class ChannelPermissions:
                             speak=True,    # Говорить
                             stream=True
                         )
+                        configured_count += 1
                 logger.info(f"✅ Добавлен доступ к голосовым каналам для роли {role.name}")
             except Exception as e:
                 logger.error(f"❌ Ошибка настройки голосовых каналов: {e}")
+        
+        return configured_count
 
 # ========== КЛАСС ДЛЯ ЛОГИРОВАНИЯ ==========
 class Logger:
@@ -720,7 +729,7 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f'🔄 Синхронизировано {len(synced)} команд')
     except Exception as e:
-        print(f'❌ Ошибка синхронизации: {e}")
+        print(f'❌ Ошибка синхронизации: {e}')
     
     # Запуск мониторинга каждые 3 секунды
     role_monitor.monitor_roles_task.start()
@@ -1010,7 +1019,7 @@ async def add_server_role(interaction: discord.Interaction,
             return
         
         # Настраиваем доступ к каналам
-        configured_channels = await ChannelPermissions.add_role_to_channels(guild, target_role, settings)
+        configured_count = await ChannelPermissions.add_role_to_channels(guild, target_role, settings)
         
         # 3. СОХРАНЯЕМ В БАЗУ ДАННЫХ
         tracked_id = db.add_tracked_role(
@@ -1047,19 +1056,25 @@ async def add_server_role(interaction: discord.Interaction,
             inline=False
         )
         
+        # Получаем каналы для отображения
+        news_channel = guild.get_channel(int(settings['news_channel_id'])) if settings.get('news_channel_id') else None
+        flood_channel = guild.get_channel(int(settings['flood_channel_id'])) if settings.get('flood_channel_id') else None
+        tags_channel = guild.get_channel(int(settings['tags_channel_id'])) if settings.get('tags_channel_id') else None
+        media_channel = guild.get_channel(int(settings['media_channel_id'])) if settings.get('media_channel_id') else None
+        
         embed.add_field(
             name="🔓 Настроен доступ к каналам:",
-            value=f"• {guild.get_channel(int(settings['news_channel_id'])).mention} - **только чтение**\n"
-                  f"• {guild.get_channel(int(settings['flood_channel_id'])).mention} - **чтение и запись**\n"
-                  f"• {guild.get_channel(int(settings['tags_channel_id'])).mention} - **только чтение**\n"
-                  f"• {guild.get_channel(int(settings['media_channel_id'])).mention} - **чтение, запись, файлы**\n"
+            value=f"• {news_channel.mention if news_channel else 'News'} - **только чтение**\n"
+                  f"• {flood_channel.mention if flood_channel else 'Flood'} - **чтение и запись**\n"
+                  f"• {tags_channel.mention if tags_channel else 'Tags'} - **только чтение**\n"
+                  f"• {media_channel.mention if media_channel else 'Media'} - **чтение, запись, файлы**\n"
                   f"• Голосовые каналы - **подключение и голос**",
             inline=False
         )
         
         embed.add_field(
             name="⚙️ Мониторинг",
-            value=f"• Проверка: каждые 3 секунды\n• Автобан при потере роли: 10 минут\n• Авторазбан: через 10 минут",
+            value=f"• Проверка: каждые 3 секунды\n• Автобан при потере роли: 10 минут\n• Авторазбан: через 10 минут\n• Настроено каналов: {configured_count}",
             inline=False
         )
         
