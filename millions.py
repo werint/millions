@@ -947,23 +947,43 @@ class RoleMonitor:
             server_data = db.get_or_create_server(str(guild.id), guild.name)
             tracked_roles = db.get_tracked_roles(server_data['id'])
             
+            # Группируем по серверам-источникам
+            servers_roles = {}
+            for tracked in tracked_roles:
+                server_id = tracked['source_server_id']
+                if server_id not in servers_roles:
+                    servers_roles[server_id] = []
+                servers_roles[server_id].append(tracked)
+            
             user_has_any_role = False
             found_roles = []
+            found_servers = set()
             
-            for tracked in tracked_roles:
-                source_guild = self.bot.get_guild(int(tracked['source_server_id']))
-                if not source_guild:
-                    continue
+            # Проверяем для каждого сервера
+            for server_id, roles_list in servers_roles.items():
+                server_has_role = False
+                server_name = roles_list[0]['source_server_name'] if roles_list else "Неизвестно"
                 
-                source_member = source_guild.get_member(user_id)
-                if source_member:
-                    source_role = source_guild.get_role(int(tracked['source_role_id']))
-                    if source_role and source_role in source_member.roles:
-                        user_has_any_role = True
-                        found_roles.append({
-                            'role': tracked['target_role_name'] or tracked['source_role_name'],
-                            'source_guild': source_guild.name
-                        })
+                for tracked in roles_list:
+                    source_guild = self.bot.get_guild(int(tracked['source_server_id']))
+                    if not source_guild:
+                        continue
+                    
+                    source_member = source_guild.get_member(user_id)
+                    if source_member:
+                        source_role = source_guild.get_role(int(tracked['source_role_id']))
+                        if source_role and source_role in source_member.roles:
+                            server_has_role = True
+                            found_roles.append({
+                                'role': tracked['source_role_name'],
+                                'source_guild': server_name,
+                                'target_role': tracked['target_role_name']
+                            })
+                            break  # Достаточно одной роли с этого сервера
+                
+                if server_has_role:
+                    user_has_any_role = True
+                    found_servers.add(server_name)
             
             return user_has_any_role, found_roles
             
@@ -972,55 +992,85 @@ class RoleMonitor:
             return False, []
     
     async def sync_user_roles(self, guild: discord.Guild, user_id: int):
-        """Синхронизировать роли пользователя"""
+        """Синхронизировать роли пользователя по новой логике (одна роль на сервер-источник)"""
         try:
             user = guild.get_member(user_id)
             if not user:
                 return False
             
-            user_has_any_role, found_roles = await self.check_user_roles(guild, user_id)
             server_data = db.get_or_create_server(str(guild.id), guild.name)
             tracked_roles = db.get_tracked_roles(server_data['id'])
             
+            # Группируем по серверам-источникам
+            servers_roles = {}
+            for tracked in tracked_roles:
+                server_id = tracked['source_server_id']
+                if server_id not in servers_roles:
+                    servers_roles[server_id] = []
+                servers_roles[server_id].append(tracked)
+            
             actions = []
             
-            for tracked in tracked_roles:
-                if not tracked['target_role_id']:
+            # Проверяем для каждого сервера-источника
+            for server_id, roles_list in servers_roles.items():
+                if not roles_list or not roles_list[0]['target_role_id']:
                     continue
                 
-                target_role = guild.get_role(int(tracked['target_role_id']))
+                target_role = guild.get_role(int(roles_list[0]['target_role_id']))
                 if not target_role:
                     continue
                 
-                # Проверяем, есть ли у пользователя исходная роль
-                source_guild = self.bot.get_guild(int(tracked['source_server_id']))
-                has_source_role = False
+                # Проверяем, есть ли у пользователя ХОТЯ БЫ ОДНА роль с этого сервера
+                has_any_source_role = False
+                source_guild_name = "Неизвестно"
                 
-                if source_guild:
+                for tracked in roles_list:
+                    source_guild = self.bot.get_guild(int(tracked['source_server_id']))
+                    if not source_guild:
+                        continue
+                    
+                    source_guild_name = source_guild.name
                     source_member = source_guild.get_member(user_id)
                     if source_member:
                         source_role = source_guild.get_role(int(tracked['source_role_id']))
-                        has_source_role = source_role and source_role in source_member.roles
+                        if source_role and source_role in source_member.roles:
+                            has_any_source_role = True
+                            break  # Достаточно одной роли
                 
                 # Синхронизируем
-                if has_source_role and target_role not in user.roles:
-                    await user.add_roles(target_role, reason="Синхронизация ролей")
+                if has_any_source_role and target_role not in user.roles:
+                    await user.add_roles(target_role, reason=f"Имеет роль с {source_guild_name}")
                     await Logger.log_role_action(
-                        guild, user, "✅ Роль добавлена", target_role, "Синхронизация ролей"
+                        guild, user, "✅ Роль добавлена", target_role, f"Имеет роль с {source_guild_name}"
                     )
-                    actions.append(f"➕ Добавлена {target_role.name}")
+                    actions.append(f"➕ Добавлена {target_role.name} (сервер: {source_guild_name})")
                 
-                elif not has_source_role and target_role in user.roles:
-                    await user.remove_roles(target_role, reason="Синхронизация ролей")
+                elif not has_any_source_role and target_role in user.roles:
+                    await user.remove_roles(target_role, reason=f"Нет ролей с {source_guild_name}")
                     await Logger.log_role_action(
-                        guild, user, "🗑️ Роль удалена", target_role, "Потеря роли на исходном сервере"
+                        guild, user, "🗑️ Роль удалена", target_role, f"Нет ролей с {source_guild_name}"
                     )
-                    actions.append(f"➖ Удалена {target_role.name}")
+                    actions.append(f"➖ Удалена {target_role.name} (сервер: {source_guild_name})")
+            
+            # Проверяем, есть ли у пользователя хотя бы одна роль из любого сервера
+            user_has_any_role = False
+            for server_id, roles_list in servers_roles.items():
+                for tracked in roles_list:
+                    source_guild = self.bot.get_guild(int(tracked['source_server_id']))
+                    if source_guild:
+                        source_member = source_guild.get_member(user_id)
+                        if source_member:
+                            source_role = source_guild.get_role(int(tracked['source_role_id']))
+                            if source_role and source_role in source_member.roles:
+                                user_has_any_role = True
+                                break
+                if user_has_any_role:
+                    break
             
             # Если нет ни одной роли - бан на 10 минут
             if not user_has_any_role and user_id not in [int(b['user_id']) for b in db.get_banned_users(server_data['id'])]:
                 await self.ban_user(guild, user_id, user.display_name, "Отсутствие требуемых ролей")
-                actions.append("🔨 Бан на 10 минут")
+                actions.append("🔨 Бан на 10 минут (нет ролей ни с одного сервера)")
             
             # Логируем проверку если были изменения
             if actions:
@@ -1442,35 +1492,53 @@ async def add_server_role(interaction: discord.Interaction,
         # Сохраняем сервер в БД
         server_data = db.get_or_create_server(str(guild.id), guild.name)
         
-        # Проверяем, не добавлена ли уже эта роль
+        # ПРОВЕРКА 1: Не добавлена ли уже эта конкретная роль (сервер + роль)
         tracked_roles = db.get_tracked_roles(server_data['id'])
         for role in tracked_roles:
             if role['source_server_id'] == source_server_id and role['source_role_id'] == source_role_id:
                 await interaction.followup.send(
-                    f"❌ Роль уже отслеживается!",
+                    f"❌ Роль {source_role.name} уже отслеживается с сервера {source_guild.name}!",
                     ephemeral=True
                 )
                 return
         
-        # 1. СОЗДАЕМ РОЛЬ НА ТЕКУЩЕМ СЕРВЕРЕ
-        # Имя роли = имя сервера-источника (обрезаем до 32 символов)
-        role_name = source_guild.name[:32]
-        target_role = await guild.create_role(
-            name=role_name,
-            permissions=discord.Permissions(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                connect=True,
-                speak=True
-            ),
-            color=discord.Color.random(),
-            reason=f"Роль для отслеживания с сервера {source_guild.name}"
-        )
+        # ПРОВЕРКА 2: Есть ли уже роль для этого сервера-источника?
+        existing_target_role = None
+        existing_roles_for_server = []
         
-        logger.info(f"✅ Создана роль {target_role.name} для сервера {source_guild.name}")
+        for role in tracked_roles:
+            if role['source_server_id'] == source_server_id:
+                existing_roles_for_server.append(role)
+                if role['target_role_id']:
+                    target_role = guild.get_role(int(role['target_role_id']))
+                    if target_role:
+                        existing_target_role = target_role
+                        break
         
-        # 2. НАСТРАИВАЕМ ДОСТУП К КАНАЛАМ С СООТВЕТСТВУЮЩИМИ ПРАВАМИ
+        # 1. СОЗДАЕМ ИЛИ ПОЛУЧАЕМ РОЛЬ НА ТЕКУЩЕМ СЕРВЕРЕ
+        if existing_target_role:
+            # Используем существующую роль
+            target_role = existing_target_role
+            logger.info(f"♻️ Использую существующую роль {target_role.name} для сервера {source_guild.name}")
+        else:
+            # Создаем новую роль
+            # Имя роли = имя сервера-источника (обрезаем до 32 символов)
+            role_name = source_guild.name[:32]
+            target_role = await guild.create_role(
+                name=role_name,
+                permissions=discord.Permissions(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    connect=True,
+                    speak=True
+                ),
+                color=discord.Color.random(),
+                reason=f"Роль для отслеживания с сервера {source_guild.name}"
+            )
+            logger.info(f"✅ Создана новая роль {target_role.name} для сервера {source_guild.name}")
+        
+        # 2. НАСТРАИВАЕМ ДОСТУП К КАНАЛАМ (если еще не настроен)
         # Получаем настройки сервера
         settings = db.get_server_settings(server_data['id'])
         
@@ -1481,8 +1549,10 @@ async def add_server_role(interaction: discord.Interaction,
             )
             return
         
-        # Настраиваем доступ к каналам
-        configured_count = await ChannelPermissions.add_role_to_channels(guild, target_role, settings)
+        # Настраиваем доступ к каналам только если это новая роль для сервера
+        configured_count = 0
+        if not existing_target_role:
+            configured_count = await ChannelPermissions.add_role_to_channels(guild, target_role, settings)
         
         # 3. СОХРАНЯЕМ В БАЗУ ДАННЫХ
         tracked_id = db.add_tracked_role(
@@ -1493,6 +1563,7 @@ async def add_server_role(interaction: discord.Interaction,
             source_role.name
         )
         
+        # Обновляем целевую роль (может быть одинаковой для всех ролей с этого сервера)
         db.update_target_role(tracked_id, str(target_role.id), target_role.name)
         
         # 4. ОТЧЕТ
@@ -1513,11 +1584,18 @@ async def add_server_role(interaction: discord.Interaction,
             inline=False
         )
         
-        embed.add_field(
-            name="➕ Созданная роль",
-            value=f"{target_role.mention}\n**Имя:** {target_role.name}\n**ID:** `{target_role.id}`",
-            inline=False
-        )
+        if existing_target_role:
+            embed.add_field(
+                name="🔄 Используется существующая роль",
+                value=f"{target_role.mention}\n**Имя:** {target_role.name}\n**ID:** `{target_role.id}`\n**Всего ролей с этого сервера:** {len(existing_roles_for_server) + 1}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="➕ Создана новая роль",
+                value=f"{target_role.mention}\n**Имя:** {target_role.name}\n**ID:** `{target_role.id}`",
+                inline=False
+            )
         
         # Получаем каналы для отображения
         news_channel = guild.get_channel(int(settings['news_channel_id'])) if settings.get('news_channel_id') else None
@@ -1525,9 +1603,16 @@ async def add_server_role(interaction: discord.Interaction,
         tags_channel = guild.get_channel(int(settings['tags_channel_id'])) if settings.get('tags_channel_id') else None
         media_channel = guild.get_channel(int(settings['media_channel_id'])) if settings.get('media_channel_id') else None
         
+        access_info = ""
+        if existing_target_role:
+            access_info = f"• Доступ уже настроен для роли {target_role.mention}\n"
+        else:
+            access_info = "• Доступ настроен впервые для этого сервера\n"
+        
         embed.add_field(
-            name="🔓 Настроен доступ к каналам:",
-            value=f"• {news_channel.mention if news_channel else 'News'} - **только чтение**\n"
+            name="🔓 Доступ к каналам:",
+            value=f"{access_info}"
+                  f"• {news_channel.mention if news_channel else 'News'} - **только чтение**\n"
                   f"• {flood_channel.mention if flood_channel else 'Flood'} - **чтение и запись**\n"
                   f"• {tags_channel.mention if tags_channel else 'Tags'} - **только чтение**\n"
                   f"• {media_channel.mention if media_channel else 'Media'} - **чтение, запись, файлы**\n"
@@ -1536,31 +1621,32 @@ async def add_server_role(interaction: discord.Interaction,
         )
         
         embed.add_field(
-            name="⚙️ Мониторинг",
-            value=f"• Проверка: каждые 3 секунды\n• Автобан при потере роли: 10 минут\n• Авторазбан: через 10 минут\n• Настроено каналов: {configured_count}",
+            name="⚙️ Логика работы:",
+            value=f"• Одна роль на сервер-источник\n• Все отслеживаемые роли с одного сервера дают доступ к одной роли\n• Условие доступа: ИЛИ (хотя бы одна роль из сервера)\n• Всего отслеживаемых ролей с {source_guild.name}: {len(existing_roles_for_server) + 1}",
             inline=False
         )
         
-        embed.set_footer(text="Теперь бот будет отслеживать эту роль и выдавать/убирать доступ автоматически")
+        embed.set_footer(text="Бот будет проверять наличие ЛЮБОЙ из отслеживаемых ролей с этого сервера")
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
         # 5. ЛОГИРОВАНИЕ В КАНАЛ LOGS
+        if existing_target_role:
+            action_type = "🔄 Добавлена дополнительная отслеживаемая роль"
+        else:
+            action_type = "📡 Добавлена первая отслеживаемая роль с сервера"
+        
         await Logger.log_to_channel(
             guild,
-            f"**📡 Добавлена отслеживаемая роль**\n"
+            f"**{action_type}**\n"
             f"• Администратор: {interaction.user.mention}\n"
             f"• Сервер-источник: {source_guild.name}\n"
             f"• Отслеживаемая роль: {source_role.name}\n"
-            f"• Созданная роль: {target_role.mention}\n"
-            f"• Настроен доступ к каналам:\n"
-            f"  - News: только чтение\n"
-            f"  - Flood: чтение/запись\n"
-            f"  - Tags: только чтение\n"
-            f"  - Media: чтение/запись + файлы\n"
-            f"  - Голосовые: подключение + голос\n"
+            f"• Используемая роль: {target_role.mention}\n"
+            f"• Всего ролей с сервера: {len(existing_roles_for_server) + 1}\n"
+            f"• Логика: ЕСЛИ (роль1 ИЛИ роль2 ИЛИ ...) ТО доступ\n"
             f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.green()
+            discord.Color.green() if not existing_target_role else discord.Color.blue()
         )
         
         # 6. СРАЗУ ПРОВЕРЯЕМ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
@@ -1577,7 +1663,7 @@ async def add_server_role(interaction: discord.Interaction,
             checked += 1
             if await role_monitor.sync_user_roles(guild, member.id):
                 updated += 1
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)  # Уменьшили задержку
         
         await Logger.log_to_channel(
             guild,
