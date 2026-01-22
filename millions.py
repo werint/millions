@@ -4,7 +4,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import asyncio
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import json
 from dotenv import load_dotenv
 import logging
@@ -19,6 +20,7 @@ load_dotenv()
 
 # Конфигурация
 TOKEN = os.getenv('DISCORD_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL')  # Для Railway PostgreSQL
 
 # Настройка интентов
 intents = discord.Intents.default()
@@ -29,24 +31,38 @@ intents.guilds = True
 # Создание бота
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# ========== БАЗА ДАННЫХ (SQLite) ==========
+# ========== БАЗА ДАННЫХ (PostgreSQL) ==========
 class Database:
-    def __init__(self, db_name='bot_database.db'):
-        self.db_name = db_name
+    def __init__(self):
+        self.conn = None
+        self.connect()
         self.init_database()
     
-    def get_connection(self):
-        """Получение соединения с БД"""
-        conn = sqlite3.connect(self.db_name)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def connect(self):
+        """Подключение к PostgreSQL Railway"""
+        try:
+            if DATABASE_URL:
+                # Для Railway с DATABASE_URL
+                self.conn = psycopg2.connect(DATABASE_URL, sslmode='require', cursor_factory=RealDictCursor)
+            else:
+                # Для локальной разработки
+                self.conn = psycopg2.connect(
+                    host=os.getenv('PGHOST', 'localhost'),
+                    database=os.getenv('PGDATABASE', 'railway'),
+                    user=os.getenv('PGUSER', 'postgres'),
+                    password=os.getenv('PGPASSWORD', ''),
+                    port=os.getenv('PGPORT', 5432),
+                    cursor_factory=RealDictCursor
+                )
+            logger.info("✅ Подключено к PostgreSQL")
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
+            sys.exit(1)
     
     def execute(self, query, params=None, fetchone=False, fetchall=False):
         """Выполнение SQL запроса"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
         try:
+            cursor = self.conn.cursor()
             cursor.execute(query, params or ())
             
             if fetchone:
@@ -56,27 +72,26 @@ class Database:
             else:
                 result = cursor.rowcount
             
-            conn.commit()
+            self.conn.commit()
+            cursor.close()
             return result
         except Exception as e:
-            conn.rollback()
+            self.conn.rollback()
             logger.error(f"❌ Ошибка SQL: {e}")
             raise
-        finally:
-            conn.close()
     
     def init_database(self):
-        """Инициализация таблиц БД - гарантируем создание таблиц"""
-        logger.info("🔄 Инициализация таблиц БД...")
+        """Инициализация таблиц БД - PostgreSQL"""
+        logger.info("🔄 Создание таблиц в PostgreSQL...")
         
         try:
             # Таблица серверов
             self.execute('''
                 CREATE TABLE IF NOT EXISTS servers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    discord_id TEXT UNIQUE NOT NULL,
-                    name TEXT NOT NULL,
-                    is_setup BOOLEAN DEFAULT 0,
+                    id SERIAL PRIMARY KEY,
+                    discord_id VARCHAR(255) UNIQUE NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    is_setup BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -84,18 +99,17 @@ class Database:
             # Таблица настроек сервера
             self.execute('''
                 CREATE TABLE IF NOT EXISTS server_settings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_id INTEGER NOT NULL,
-                    admin_role_1_id TEXT,
-                    admin_role_2_id TEXT,
-                    news_channel_id TEXT,
-                    flood_channel_id TEXT,
-                    tags_channel_id TEXT,
-                    media_channel_id TEXT,
-                    logs_channel_id TEXT,
-                    high_flood_channel_id TEXT,
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    admin_role_1_id VARCHAR(255),
+                    admin_role_2_id VARCHAR(255),
+                    news_channel_id VARCHAR(255),
+                    flood_channel_id VARCHAR(255),
+                    tags_channel_id VARCHAR(255),
+                    media_channel_id VARCHAR(255),
+                    logs_channel_id VARCHAR(255),
+                    high_flood_channel_id VARCHAR(255),
                     voice_channel_ids TEXT,
-                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
                     UNIQUE(server_id)
                 )
             ''')
@@ -103,17 +117,16 @@ class Database:
             # Таблица отслеживаемых ролей
             self.execute('''
                 CREATE TABLE IF NOT EXISTS tracked_roles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_id INTEGER NOT NULL,
-                    source_server_id TEXT NOT NULL,
-                    source_server_name TEXT,
-                    source_role_id TEXT NOT NULL,
-                    source_role_name TEXT,
-                    target_role_id TEXT,
-                    target_role_name TEXT,
-                    is_active BOOLEAN DEFAULT 1,
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    source_server_id VARCHAR(255) NOT NULL,
+                    source_server_name VARCHAR(255),
+                    source_role_id VARCHAR(255) NOT NULL,
+                    source_role_name VARCHAR(255),
+                    target_role_id VARCHAR(255),
+                    target_role_name VARCHAR(255),
+                    is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
                     UNIQUE(server_id, source_server_id, source_role_id)
                 )
             ''')
@@ -121,15 +134,13 @@ class Database:
             # Таблица пользователей с ролями
             self.execute('''
                 CREATE TABLE IF NOT EXISTS user_roles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_id INTEGER NOT NULL,
-                    user_id TEXT NOT NULL,
-                    username TEXT,
-                    tracked_role_id INTEGER NOT NULL,
-                    has_role BOOLEAN DEFAULT 0,
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    user_id VARCHAR(255) NOT NULL,
+                    username VARCHAR(255),
+                    tracked_role_id INTEGER NOT NULL REFERENCES tracked_roles(id) ON DELETE CASCADE,
+                    has_role BOOLEAN DEFAULT FALSE,
                     last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
-                    FOREIGN KEY (tracked_role_id) REFERENCES tracked_roles (id) ON DELETE CASCADE,
                     UNIQUE(server_id, user_id, tracked_role_id)
                 )
             ''')
@@ -137,23 +148,22 @@ class Database:
             # Таблица забаненных пользователей
             self.execute('''
                 CREATE TABLE IF NOT EXISTS banned_users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_id INTEGER NOT NULL,
-                    user_id TEXT NOT NULL,
-                    username TEXT NOT NULL,
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    user_id VARCHAR(255) NOT NULL,
+                    username VARCHAR(255) NOT NULL,
                     ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     unban_time TIMESTAMP,
                     ban_duration INTEGER DEFAULT 600,
                     reason TEXT,
-                    is_unbanned BOOLEAN DEFAULT 0,
-                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
+                    is_unbanned BOOLEAN DEFAULT FALSE,
                     UNIQUE(server_id, user_id)
                 )
             ''')
             
-            logger.info("✅ Таблицы БД успешно созданы/проверены")
+            logger.info("✅ Таблицы PostgreSQL успешно созданы/проверены")
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка инициализации БД: {e}")
+            logger.error(f"❌ Критическая ошибка инициализации PostgreSQL: {e}")
             raise
     
     # ========== МЕТОДЫ ДЛЯ СЕРВЕРОВ ==========
@@ -161,7 +171,7 @@ class Database:
     def get_or_create_server(self, discord_id: str, name: str) -> dict:
         """Получить или создать сервер в БД"""
         result = self.execute(
-            'SELECT * FROM servers WHERE discord_id = ?',
+            'SELECT * FROM servers WHERE discord_id = %s',
             (discord_id,),
             fetchone=True
         )
@@ -170,12 +180,14 @@ class Database:
             return dict(result)
         
         self.execute(
-            'INSERT OR IGNORE INTO servers (discord_id, name) VALUES (?, ?)',
+            '''INSERT INTO servers (discord_id, name) 
+               VALUES (%s, %s) 
+               ON CONFLICT (discord_id) DO NOTHING''',
             (discord_id, name)
         )
         
         result = self.execute(
-            'SELECT * FROM servers WHERE discord_id = ?',
+            'SELECT * FROM servers WHERE discord_id = %s',
             (discord_id,),
             fetchone=True
         )
@@ -184,7 +196,7 @@ class Database:
     def mark_server_setup(self, discord_id: str):
         """Отметить сервер как настроенный"""
         self.execute(
-            'UPDATE servers SET is_setup = 1 WHERE discord_id = ?',
+            'UPDATE servers SET is_setup = TRUE WHERE discord_id = %s',
             (discord_id,)
         )
     
@@ -195,11 +207,22 @@ class Database:
         voice_channel_ids = json.dumps(settings.get('voice_channel_ids', []))
         
         self.execute('''
-            INSERT OR REPLACE INTO server_settings 
+            INSERT INTO server_settings 
             (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
              flood_channel_id, tags_channel_id, media_channel_id, 
              logs_channel_id, high_flood_channel_id, voice_channel_ids)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (server_id) 
+            DO UPDATE SET 
+                admin_role_1_id = EXCLUDED.admin_role_1_id,
+                admin_role_2_id = EXCLUDED.admin_role_2_id,
+                news_channel_id = EXCLUDED.news_channel_id,
+                flood_channel_id = EXCLUDED.flood_channel_id,
+                tags_channel_id = EXCLUDED.tags_channel_id,
+                media_channel_id = EXCLUDED.media_channel_id,
+                logs_channel_id = EXCLUDED.logs_channel_id,
+                high_flood_channel_id = EXCLUDED.high_flood_channel_id,
+                voice_channel_ids = EXCLUDED.voice_channel_ids
         ''', (
             server_id,
             settings.get('admin_role_1_id'),
@@ -216,7 +239,7 @@ class Database:
     def get_server_settings(self, server_id: int) -> dict:
         """Получить настройки сервера"""
         result = self.execute(
-            'SELECT * FROM server_settings WHERE server_id = ?',
+            'SELECT * FROM server_settings WHERE server_id = %s',
             (server_id,),
             fetchone=True
         )
@@ -230,7 +253,7 @@ class Database:
         # Сначала пробуем найти существующую
         result = self.execute(
             '''SELECT id FROM tracked_roles 
-               WHERE server_id = ? AND source_server_id = ? AND source_role_id = ?''',
+               WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
             (server_id, source_server_id, source_role_id),
             fetchone=True
         )
@@ -238,7 +261,7 @@ class Database:
         if result:
             # Активируем существующую
             self.execute(
-                'UPDATE tracked_roles SET is_active = 1 WHERE id = ?',
+                'UPDATE tracked_roles SET is_active = TRUE WHERE id = %s',
                 (result['id'],)
             )
             return result['id']
@@ -247,12 +270,12 @@ class Database:
         self.execute('''
             INSERT INTO tracked_roles 
             (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
         ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
         
         result = self.execute(
             '''SELECT id FROM tracked_roles 
-               WHERE server_id = ? AND source_server_id = ? AND source_role_id = ?''',
+               WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
             (server_id, source_server_id, source_role_id),
             fetchone=True
         )
@@ -263,18 +286,32 @@ class Database:
         """Обновить целевую роль"""
         self.execute('''
             UPDATE tracked_roles 
-            SET target_role_id = ?, target_role_name = ? 
-            WHERE id = ?
+            SET target_role_id = %s, target_role_name = %s 
+            WHERE id = %s
         ''', (target_role_id, target_role_name, tracked_role_id))
     
     def get_tracked_roles(self, server_id: int) -> list:
         """Получить все отслеживаемые роли сервера"""
         results = self.execute(
-            'SELECT * FROM tracked_roles WHERE server_id = ? AND is_active = 1',
+            'SELECT * FROM tracked_roles WHERE server_id = %s AND is_active = TRUE',
             (server_id,),
             fetchall=True
         )
-        return [dict(r) for r in results]
+        return [dict(r) for r in results] if results else []
+    
+    def delete_tracked_role(self, tracked_role_id: int):
+        """Удалить отслеживаемую роль"""
+        self.execute(
+            'DELETE FROM tracked_roles WHERE id = %s',
+            (tracked_role_id,)
+        )
+    
+    def deactivate_tracked_role(self, tracked_role_id: int):
+        """Деактивировать отслеживаемую роль"""
+        self.execute(
+            'UPDATE tracked_roles SET is_active = FALSE WHERE id = %s',
+            (tracked_role_id,)
+        )
     
     # ========== МЕТОДЫ ДЛЯ БАНОВ ==========
     
@@ -283,13 +320,20 @@ class Database:
         unban_time = datetime.now() + timedelta(seconds=600)
         
         self.execute('''
-            INSERT OR REPLACE INTO banned_users 
+            INSERT INTO banned_users 
             (server_id, user_id, username, unban_time, reason)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (server_id, user_id) 
+            DO UPDATE SET 
+                username = EXCLUDED.username,
+                unban_time = EXCLUDED.unban_time,
+                reason = EXCLUDED.reason,
+                ban_time = CURRENT_TIMESTAMP,
+                is_unbanned = FALSE
         ''', (server_id, user_id, username, unban_time.isoformat(), reason))
         
         result = self.execute(
-            'SELECT id FROM banned_users WHERE server_id = ? AND user_id = ?',
+            'SELECT id FROM banned_users WHERE server_id = %s AND user_id = %s',
             (server_id, user_id),
             fetchone=True
         )
@@ -300,31 +344,239 @@ class Database:
         """Разбанить пользователя"""
         self.execute('''
             UPDATE banned_users 
-            SET is_unbanned = 1, unban_time = CURRENT_TIMESTAMP
-            WHERE server_id = ? AND user_id = ? AND is_unbanned = 0
+            SET is_unbanned = TRUE, unban_time = CURRENT_TIMESTAMP
+            WHERE server_id = %s AND user_id = %s AND is_unbanned = FALSE
         ''', (server_id, user_id))
     
     def get_banned_users(self, server_id: int) -> list:
         """Получить забаненных пользователей"""
         results = self.execute(
-            'SELECT * FROM banned_users WHERE server_id = ? AND is_unbanned = 0',
+            'SELECT * FROM banned_users WHERE server_id = %s AND is_unbanned = FALSE',
             (server_id,),
             fetchall=True
         )
-        return [dict(r) for r in results]
+        return [dict(r) for r in results] if results else []
     
     def get_users_to_unban(self) -> list:
         """Получить пользователей для авторазбана"""
         results = self.execute(
             '''SELECT * FROM banned_users 
-               WHERE is_unbanned = 0 AND unban_time <= ?''',
+               WHERE is_unbanned = FALSE AND unban_time <= %s''',
             (datetime.now().isoformat(),),
             fetchall=True
         )
-        return [dict(r) for r in results]
+        return [dict(r) for r in results] if results else []
 
 # Инициализация БД
 db = Database()
+
+# ========== КОМАНДА УДАЛЕНИЯ РОЛЕЙ ==========
+class DeleteRoleView(discord.ui.View):
+    """Представление для удаления отслеживаемых ролей"""
+    def __init__(self, guild: discord.Guild, tracked_roles: list):
+        super().__init__(timeout=60)
+        self.guild = guild
+        self.tracked_roles = tracked_roles
+        
+        # Добавляем выпадающий список с ролями
+        self.add_item(RoleSelect(tracked_roles))
+
+class RoleSelect(discord.ui.Select):
+    """Выпадающий список для выбора роли"""
+    def __init__(self, tracked_roles: list):
+        options = []
+        
+        for role in tracked_roles:
+            option = discord.SelectOption(
+                label=role['target_role_name'] or role['source_server_name'],
+                value=str(role['id']),
+                description=f"Сервер: {role['source_server_name']} | Роль: {role['source_role_name']}"
+            )
+            options.append(option)
+        
+        super().__init__(
+            placeholder="Выберите роль для удаления...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        selected_id = int(self.values[0])
+        
+        # Находим выбранную роль
+        selected_role = None
+        for role in self.view.tracked_roles:
+            if role['id'] == selected_id:
+                selected_role = role
+                break
+        
+        if not selected_role:
+            await interaction.response.send_message(
+                "❌ Роль не найдена!",
+                ephemeral=True
+            )
+            return
+        
+        # Получаем объект роли на сервере
+        target_role = self.view.guild.get_role(int(selected_role['target_role_id'])) if selected_role['target_role_id'] else None
+        
+        # Создаем embed для подтверждения
+        embed = discord.Embed(
+            title="⚠️ Подтверждение удаления",
+            description=f"Вы уверены, что хотите удалить отслеживание этой роли?",
+            color=discord.Color.orange()
+        )
+        
+        embed.add_field(
+            name="📡 Сервер-источник",
+            value=f"**Имя:** {selected_role['source_server_name']}\n**ID:** `{selected_role['source_server_id']}`",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🎯 Отслеживаемая роль",
+            value=f"**Имя:** {selected_role['source_role_name']}\n**ID:** `{selected_role['source_role_id']}`",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🗑️ Роль на этом сервере",
+            value=f"{target_role.mention if target_role else '❌ Роль не найдена'}\n**Имя:** {selected_role['target_role_name']}\n**ID:** `{selected_role['target_role_id']}`",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚠️ Последствия удаления:",
+            value="• Роль будет удалена из отслеживания\n"
+                  "• Доступ к каналам будет убран\n"
+                  "• Роль останется на сервере (можно удалить вручную)\n"
+                  "• Все пользователи потеряют доступ\n"
+                  "• Пользователи без других ролей будут забанены",
+            inline=False
+        )
+        
+        view = ConfirmDeleteView(selected_id, target_role, selected_role)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class ConfirmDeleteView(discord.ui.View):
+    """Кнопки подтверждения удаления"""
+    def __init__(self, role_id: int, target_role: discord.Role, role_data: dict):
+        super().__init__(timeout=60)
+        self.role_id = role_id
+        self.target_role = target_role
+        self.role_data = role_data
+    
+    @discord.ui.button(label="✅ Да, удалить", style=discord.ButtonStyle.danger)
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            # Удаляем из базы данных
+            db.deactivate_tracked_role(self.role_id)
+            
+            # Убираем доступ к каналам если роль существует
+            if self.target_role:
+                # Получаем настройки сервера
+                server_data = db.get_or_create_server(str(interaction.guild.id), interaction.guild.name)
+                settings = db.get_server_settings(server_data['id'])
+                
+                if settings:
+                    # Убираем доступ ко всем каналам
+                    channel_ids = []
+                    
+                    # Добавляем текстовые каналы
+                    for key in ['news_channel_id', 'flood_channel_id', 'tags_channel_id', 'media_channel_id']:
+                        if settings.get(key):
+                            channel_ids.append(settings[key])
+                    
+                    # Добавляем голосовые каналы
+                    if settings.get('voice_channel_ids'):
+                        try:
+                            voice_ids = json.loads(settings['voice_channel_ids'])
+                            channel_ids.extend(voice_ids)
+                        except:
+                            pass
+                    
+                    for channel_id in channel_ids:
+                        if channel_id:
+                            try:
+                                channel = interaction.guild.get_channel(int(channel_id))
+                                if channel:
+                                    # Убираем все права
+                                    await channel.set_permissions(self.target_role, overwrite=None)
+                            except Exception as e:
+                                logger.error(f"❌ Ошибка удаления прав: {e}")
+            
+            # Удаляем роль у всех пользователей
+            if self.target_role:
+                members_with_role = [member for member in interaction.guild.members if self.target_role in member.roles]
+                for member in members_with_role:
+                    try:
+                        await member.remove_roles(self.target_role, reason="Удаление отслеживаемой роли")
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка удаления роли у {member}: {e}")
+            
+            # Логируем удаление
+            await Logger.log_to_channel(
+                interaction.guild,
+                f"**🗑️ Отслеживаемая роль удалена**\n"
+                f"• Администратор: {interaction.user.mention}\n"
+                f"• Сервер-источник: {self.role_data['source_server_name']}\n"
+                f"• Отслеживаемая роль: {self.role_data['source_role_name']}\n"
+                f"• Роль на сервере: {self.target_role.mention if self.target_role else 'Удалена'}\n"
+                f"• Пользователей с ролью: {len(members_with_role) if self.target_role else 0}\n"
+                f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+                discord.Color.red()
+            )
+            
+            # Отправляем подтверждение
+            embed = discord.Embed(
+                title="✅ Роль удалена из отслеживания",
+                description=f"Отслеживание роли успешно удалено.",
+                color=discord.Color.green()
+            )
+            
+            embed.add_field(
+                name="📡 Удаленная роль",
+                value=f"**Сервер:** {self.role_data['source_server_name']}\n**Роль:** {self.role_data['source_role_name']}",
+                inline=False
+            )
+            
+            if self.target_role:
+                embed.add_field(
+                    name="⚠️ Что сделано:",
+                    value=f"• Роль {self.target_role.mention} удалена из отслеживания\n"
+                          f"• Доступ к каналам убран\n"
+                          f"• Роль снята с {len(members_with_role)} пользователей\n"
+                          f"• Роль осталась на сервере (удалите вручную если нужно)",
+                    inline=False
+                )
+            
+            # Обновляем интерфейс
+            for item in self.children:
+                item.disabled = True
+            
+            await interaction.response.edit_message(embed=embed, view=self)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления роли: {e}")
+            await interaction.response.send_message(
+                f"❌ Ошибка при удалении роли: {str(e)}",
+                ephemeral=True
+            )
+    
+    @discord.ui.button(label="❌ Отмена", style=discord.ButtonStyle.secondary)
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="❌ Удаление отменено",
+            description="Роль не была удалена.",
+            color=discord.Color.red()
+        )
+        
+        # Отключаем все кнопки
+        for item in self.children:
+            item.disabled = True
+        
+        await interaction.response.edit_message(embed=embed, view=self)
 
 # ========== КЛАСС ДЛЯ НАСТРОЙКИ ДОСТУПА К КАНАЛАМ ==========
 class ChannelPermissions:
@@ -735,6 +987,61 @@ async def on_ready():
     role_monitor.monitor_roles_task.start()
     print('👁️ Мониторинг ролей запущен (каждые 3 секунды)')
 
+# ========== КОМАНДА /REMOVE_ROLE ==========
+@bot.tree.command(name="remove_role", description="Удалить отслеживаемую роль с другого сервера")
+@app_commands.checks.has_permissions(administrator=True)
+async def remove_tracked_role(interaction: discord.Interaction):
+    """Удалить отслеживаемую роль"""
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Логируем команду
+        await Logger.log_command(interaction, "remove_role")
+        
+        guild = interaction.guild
+        server_data = db.get_or_create_server(str(guild.id), guild.name)
+        tracked_roles = db.get_tracked_roles(server_data['id'])
+        
+        if not tracked_roles:
+            await interaction.followup.send(
+                "ℹ️ Нет отслеживаемых ролей для удаления.",
+                ephemeral=True
+            )
+            return
+        
+        # Создаем embed с информацией
+        embed = discord.Embed(
+            title="🗑️ Удаление отслеживаемой роли",
+            description="Выберите роль из списка ниже для удаления:",
+            color=discord.Color.orange()
+        )
+        
+        embed.add_field(
+            name="📋 Доступные роли",
+            value=f"Найдено {len(tracked_roles)} отслеживаемых ролей",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚠️ Внимание",
+            value="При удалении роли:\n• Прекратится отслеживание\n• Уберется доступ к каналам\n• Роль останется на сервере\n• Пользователи без других ролей будут забанены",
+            inline=False
+        )
+        
+        # Создаем представление с выпадающим списком
+        view = DeleteRoleView(guild, tracked_roles)
+        
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка команды remove_role: {e}")
+        await Logger.log_error(interaction.guild, str(e), "Команда /remove_role")
+        await interaction.followup.send(
+            f"❌ Ошибка: {str(e)}",
+            ephemeral=True
+        )
+
 # ========== КОМАНДА /SETT ==========
 @bot.tree.command(name="sett", description="Настройка сервера: создание каналов и админских ролей")
 @app_commands.checks.has_permissions(administrator=True)
@@ -745,6 +1052,9 @@ async def setup_server(interaction: discord.Interaction):
     guild = interaction.guild
     
     try:
+        # Логируем команду
+        await Logger.log_command(interaction, "sett")
+        
         # Сохраняем сервер в БД
         server_data = db.get_or_create_server(str(guild.id), guild.name)
         logger.info(f"🔧 Настройка сервера: {guild.name}")
@@ -895,8 +1205,9 @@ async def setup_server(interaction: discord.Interaction):
         embed.add_field(
             name="📋 Что делать дальше:",
             value="1. Используйте `/serv ID_сервера ID_роли` чтобы добавить отслеживаемую роль\n"
-                  "2. Бот создаст роль с именем сервера\n"
-                  "3. Настроит доступ к каналам согласно правам:\n"
+                  "2. Используйте `/remove_role` чтобы удалить отслеживаемую роль\n"
+                  "3. Бот создаст роль с именем сервера\n"
+                  "4. Настроит доступ к каналам согласно правам:\n"
                   "   • News - только чтение\n"
                   "   • Flood - чтение/запись\n"
                   "   • Tags - только чтение\n"
@@ -947,7 +1258,7 @@ async def add_server_role(interaction: discord.Interaction,
     guild = interaction.guild
     
     try:
-        # Логируем начало команды
+        # Логируем команду
         await Logger.log_command(interaction, "serv")
         
         # Проверяем валидность ID
@@ -1479,7 +1790,7 @@ async def server_stats(interaction: discord.Interaction):
         
         # Логируем просмотр статистики
         await Logger.log_to_channel(
-            guild,
+            interaction.guild,
             f"**📊 Просмотр статистики**\n"
             f"• Администратор: {interaction.user.mention}\n"
             f"• Участники: {total_members}\n"
@@ -1522,6 +1833,7 @@ async def ping_command(interaction: discord.Interaction):
 # ========== ОБРАБОТКА ОШИБОК КОМАНД ==========
 @setup_server.error
 @add_server_role.error
+@remove_tracked_role.error
 @check_user.error
 @sync_all.error
 @unban_user.error
@@ -1558,13 +1870,15 @@ if __name__ == "__main__":
     print(f"  • Проверка ролей: каждые 3 секунды")
     print(f"  • Автобан: 10 минут")
     print(f"  • Логирование: в канал 'logs'")
-    print(f"  • База данных: SQLite (таблицы создаются автоматически)")
+    print(f"  • База данных: PostgreSQL (таблицы создаются автоматически)")
     print(f"  • Доступ к каналам при добавлении роли:")
     print(f"    - News: только чтение")
     print(f"    - Flood: чтение и запись")
     print(f"    - Tags: только чтение")
     print(f"    - Media: чтение, запись, файлы")
     print(f"    - Голосовые: подключение, голос")
+    print(f"  • Новые команды:")
+    print(f"    - /remove_role - удалить отслеживаемую роль")
     
     try:
         bot.run(TOKEN)
