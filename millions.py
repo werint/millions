@@ -4,8 +4,6 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import asyncio
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import json
 from dotenv import load_dotenv
 import logging
@@ -20,7 +18,11 @@ load_dotenv()
 
 # Конфигурация
 TOKEN = os.getenv('DISCORD_TOKEN')
-DATABASE_URL = os.getenv('DATABASE_URL')  # Для Railway PostgreSQL
+if not TOKEN:
+    print("❌ ОШИБКА: DISCORD_TOKEN не найден!")
+    print("💡 Установите переменную в настройках Railway:")
+    print("   DISCORD_TOKEN=ваш_токен_бота")
+    sys.exit(1)
 
 # Настройка интентов
 intents = discord.Intents.default()
@@ -31,38 +33,130 @@ intents.guilds = True
 # Создание бота
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# ========== БАЗА ДАННЫХ (PostgreSQL) ==========
+# ========== БАЗА ДАННЫХ (PostgreSQL для Railway) ==========
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    logger.error("❌ psycopg2 не установлен!")
+    POSTGRES_AVAILABLE = False
+
 class Database:
     def __init__(self):
         self.conn = None
         self.connect()
-        self.init_database()
+        if self.conn:
+            self.init_database()
     
     def connect(self):
         """Подключение к PostgreSQL Railway"""
+        if not POSTGRES_AVAILABLE:
+            logger.error("❌ psycopg2 не установлен. Запустите: pip install psycopg2-binary")
+            sys.exit(1)
+        
         try:
+            # Получаем DATABASE_URL из переменных окружения Railway
+            DATABASE_URL = os.getenv('DATABASE_URL')
+            
             if DATABASE_URL:
-                # Для Railway с DATABASE_URL
-                self.conn = psycopg2.connect(DATABASE_URL, sslmode='require', cursor_factory=RealDictCursor)
-            else:
-                # Для локальной разработки
+                # Railway предоставляет DATABASE_URL в формате:
+                # postgresql://username:password@host:port/database
+                # Нужно преобразовать для psycopg2
+                if DATABASE_URL.startswith('postgresql://'):
+                    # Заменяем на формат psycopg2
+                    DATABASE_URL = DATABASE_URL.replace('postgresql://', 'postgres://')
+                
+                logger.info(f"🔗 Подключаюсь к PostgreSQL через DATABASE_URL")
                 self.conn = psycopg2.connect(
-                    host=os.getenv('PGHOST', 'localhost'),
-                    database=os.getenv('PGDATABASE', 'railway'),
-                    user=os.getenv('PGUSER', 'postgres'),
-                    password=os.getenv('PGPASSWORD', ''),
-                    port=os.getenv('PGPORT', 5432),
+                    DATABASE_URL,
+                    sslmode='require',
                     cursor_factory=RealDictCursor
                 )
-            logger.info("✅ Подключено к PostgreSQL")
+            else:
+                # Альтернативные переменные окружения
+                db_config = {
+                    'host': os.getenv('PGHOST'),
+                    'database': os.getenv('PGDATABASE'),
+                    'user': os.getenv('PGUSER'),
+                    'password': os.getenv('PGPASSWORD'),
+                    'port': os.getenv('PGPORT', 5432)
+                }
+                
+                # Проверяем, все ли переменные есть
+                if all(db_config.values()):
+                    logger.info(f"🔗 Подключаюсь к PostgreSQL: {db_config['host']}:{db_config['port']}")
+                    self.conn = psycopg2.connect(
+                        host=db_config['host'],
+                        database=db_config['database'],
+                        user=db_config['user'],
+                        password=db_config['password'],
+                        port=db_config['port'],
+                        cursor_factory=RealDictCursor
+                    )
+                else:
+                    logger.error("❌ Не найдены переменные PostgreSQL!")
+                    logger.error("💡 На Railway добавьте PostgreSQL через Add Plugin")
+                    logger.error("💡 Railway автоматически создаст DATABASE_URL")
+                    sys.exit(1)
+            
+            logger.info("✅ Успешное подключение к PostgreSQL")
+            return True
+            
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
+            
+            # Подсказки для решения проблемы
+            logger.info("💡 Решение проблем:")
+            logger.info("1. На Railway добавьте PostgreSQL через 'Add Plugin'")
+            logger.info("2. Railway автоматически создаст DATABASE_URL")
+            logger.info("3. Или укажите переменные вручную:")
+            logger.info("   PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGPORT")
+            logger.info("4. Проверьте что psycopg2-binary установлен")
+            
+            # Запрашиваем конфигурацию у пользователя
+            self.setup_database_manually()
+            return False
+    
+    def setup_database_manually(self):
+        """Ручная настройка базы данных"""
+        logger.info("🔄 Пытаюсь использовать SQLite как временное решение...")
+        
+        try:
+            import sqlite3
+            self.use_sqlite = True
+            self.db_name = 'bot_database.db'
+            
+            # Создаем SQLite соединение
+            self.conn = sqlite3.connect(self.db_name)
+            self.conn.row_factory = sqlite3.Row
+            
+            logger.info(f"✅ Использую SQLite базу: {self.db_name}")
+            logger.info("⚠️ ВНИМАНИЕ: SQLite не поддерживает многопользовательский доступ")
+            logger.info("💡 Для продакшена используйте PostgreSQL на Railway")
+            
+            return True
+        except Exception as e:
+            logger.error(f"❌ Не удалось создать SQLite базу: {e}")
             sys.exit(1)
     
     def execute(self, query, params=None, fetchone=False, fetchall=False):
         """Выполнение SQL запроса"""
         try:
             cursor = self.conn.cursor()
+            
+            # Адаптируем запрос для SQLite если нужно
+            if hasattr(self, 'use_sqlite') and self.use_sqlite:
+                query = query.replace('%s', '?')
+                query = query.replace('SERIAL', 'INTEGER')
+                query = query.replace('VARCHAR', 'TEXT')
+                query = query.replace('BOOLEAN', 'INTEGER')
+                query = query.replace('TRUE', '1')
+                query = query.replace('FALSE', '0')
+                query = query.replace('TIMESTAMP DEFAULT CURRENT_TIMESTAMP', 'TIMESTAMP')
+                query = query.replace('ON CONFLICT DO UPDATE', 'ON CONFLICT REPLACE')
+                query = query.replace('EXCLUDED.', 'excluded.')
+            
             cursor.execute(query, params or ())
             
             if fetchone:
@@ -72,17 +166,23 @@ class Database:
             else:
                 result = cursor.rowcount
             
-            self.conn.commit()
+            if not hasattr(self, 'use_sqlite') or not self.use_sqlite:
+                self.conn.commit()
+            else:
+                self.conn.commit()
+            
             cursor.close()
             return result
         except Exception as e:
-            self.conn.rollback()
+            if not hasattr(self, 'use_sqlite') or not self.use_sqlite:
+                self.conn.rollback()
             logger.error(f"❌ Ошибка SQL: {e}")
+            logger.error(f"Запрос: {query[:100]}...")
             raise
     
     def init_database(self):
-        """Инициализация таблиц БД - PostgreSQL"""
-        logger.info("🔄 Создание таблиц в PostgreSQL...")
+        """Инициализация таблиц БД"""
+        logger.info("🔄 Создание таблиц в базе данных...")
         
         try:
             # Таблица серверов
@@ -100,7 +200,7 @@ class Database:
             self.execute('''
                 CREATE TABLE IF NOT EXISTS server_settings (
                     id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    server_id INTEGER NOT NULL,
                     admin_role_1_id VARCHAR(255),
                     admin_role_2_id VARCHAR(255),
                     news_channel_id VARCHAR(255),
@@ -118,7 +218,7 @@ class Database:
             self.execute('''
                 CREATE TABLE IF NOT EXISTS tracked_roles (
                     id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    server_id INTEGER NOT NULL,
                     source_server_id VARCHAR(255) NOT NULL,
                     source_server_name VARCHAR(255),
                     source_role_id VARCHAR(255) NOT NULL,
@@ -135,10 +235,10 @@ class Database:
             self.execute('''
                 CREATE TABLE IF NOT EXISTS user_roles (
                     id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    server_id INTEGER NOT NULL,
                     user_id VARCHAR(255) NOT NULL,
                     username VARCHAR(255),
-                    tracked_role_id INTEGER NOT NULL REFERENCES tracked_roles(id) ON DELETE CASCADE,
+                    tracked_role_id INTEGER NOT NULL,
                     has_role BOOLEAN DEFAULT FALSE,
                     last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(server_id, user_id, tracked_role_id)
@@ -149,7 +249,7 @@ class Database:
             self.execute('''
                 CREATE TABLE IF NOT EXISTS banned_users (
                     id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    server_id INTEGER NOT NULL,
                     user_id VARCHAR(255) NOT NULL,
                     username VARCHAR(255) NOT NULL,
                     ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -161,9 +261,17 @@ class Database:
                 )
             ''')
             
-            logger.info("✅ Таблицы PostgreSQL успешно созданы/проверены")
+            logger.info("✅ Таблицы базы данных успешно созданы/проверены")
+            
+            # Проверяем соединение
+            test_result = self.execute('SELECT 1 as test', fetchone=True)
+            if test_result:
+                logger.info(f"✅ Тест подключения к БД пройден")
+            else:
+                logger.error("❌ Тест подключения к БД не пройден")
+                
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка инициализации PostgreSQL: {e}")
+            logger.error(f"❌ Критическая ошибка инициализации БД: {e}")
             raise
     
     # ========== МЕТОДЫ ДЛЯ СЕРВЕРОВ ==========
@@ -179,12 +287,23 @@ class Database:
         if result:
             return dict(result)
         
-        self.execute(
-            '''INSERT INTO servers (discord_id, name) 
-               VALUES (%s, %s) 
-               ON CONFLICT (discord_id) DO NOTHING''',
-            (discord_id, name)
-        )
+        try:
+            self.execute(
+                '''INSERT INTO servers (discord_id, name) 
+                   VALUES (%s, %s)
+                   ON CONFLICT (discord_id) DO NOTHING''',
+                (discord_id, name)
+            )
+        except Exception as e:
+            # Для SQLite другой синтаксис
+            if 'DO NOTHING' in str(e):
+                self.execute(
+                    '''INSERT OR IGNORE INTO servers (discord_id, name) 
+                       VALUES (%s, %s)''',
+                    (discord_id, name)
+                )
+            else:
+                raise
         
         result = self.execute(
             'SELECT * FROM servers WHERE discord_id = %s',
@@ -206,35 +325,59 @@ class Database:
         """Сохранить настройки сервера"""
         voice_channel_ids = json.dumps(settings.get('voice_channel_ids', []))
         
-        self.execute('''
-            INSERT INTO server_settings 
-            (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
-             flood_channel_id, tags_channel_id, media_channel_id, 
-             logs_channel_id, high_flood_channel_id, voice_channel_ids)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (server_id) 
-            DO UPDATE SET 
-                admin_role_1_id = EXCLUDED.admin_role_1_id,
-                admin_role_2_id = EXCLUDED.admin_role_2_id,
-                news_channel_id = EXCLUDED.news_channel_id,
-                flood_channel_id = EXCLUDED.flood_channel_id,
-                tags_channel_id = EXCLUDED.tags_channel_id,
-                media_channel_id = EXCLUDED.media_channel_id,
-                logs_channel_id = EXCLUDED.logs_channel_id,
-                high_flood_channel_id = EXCLUDED.high_flood_channel_id,
-                voice_channel_ids = EXCLUDED.voice_channel_ids
-        ''', (
-            server_id,
-            settings.get('admin_role_1_id'),
-            settings.get('admin_role_2_id'),
-            settings.get('news_channel_id'),
-            settings.get('flood_channel_id'),
-            settings.get('tags_channel_id'),
-            settings.get('media_channel_id'),
-            settings.get('logs_channel_id'),
-            settings.get('high_flood_channel_id'),
-            voice_channel_ids
-        ))
+        try:
+            self.execute('''
+                INSERT INTO server_settings 
+                (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
+                 flood_channel_id, tags_channel_id, media_channel_id, 
+                 logs_channel_id, high_flood_channel_id, voice_channel_ids)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (server_id) 
+                DO UPDATE SET 
+                    admin_role_1_id = EXCLUDED.admin_role_1_id,
+                    admin_role_2_id = EXCLUDED.admin_role_2_id,
+                    news_channel_id = EXCLUDED.news_channel_id,
+                    flood_channel_id = EXCLUDED.flood_channel_id,
+                    tags_channel_id = EXCLUDED.tags_channel_id,
+                    media_channel_id = EXCLUDED.media_channel_id,
+                    logs_channel_id = EXCLUDED.logs_channel_id,
+                    high_flood_channel_id = EXCLUDED.high_flood_channel_id,
+                    voice_channel_ids = EXCLUDED.voice_channel_ids
+            ''', (
+                server_id,
+                settings.get('admin_role_1_id'),
+                settings.get('admin_role_2_id'),
+                settings.get('news_channel_id'),
+                settings.get('flood_channel_id'),
+                settings.get('tags_channel_id'),
+                settings.get('media_channel_id'),
+                settings.get('logs_channel_id'),
+                settings.get('high_flood_channel_id'),
+                voice_channel_ids
+            ))
+        except Exception as e:
+            # Для SQLite
+            if 'EXCLUDED' in str(e):
+                self.execute('''
+                    INSERT OR REPLACE INTO server_settings 
+                    (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
+                     flood_channel_id, tags_channel_id, media_channel_id, 
+                     logs_channel_id, high_flood_channel_id, voice_channel_ids)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (
+                    server_id,
+                    settings.get('admin_role_1_id'),
+                    settings.get('admin_role_2_id'),
+                    settings.get('news_channel_id'),
+                    settings.get('flood_channel_id'),
+                    settings.get('tags_channel_id'),
+                    settings.get('media_channel_id'),
+                    settings.get('logs_channel_id'),
+                    settings.get('high_flood_channel_id'),
+                    voice_channel_ids
+                ))
+            else:
+                raise
     
     def get_server_settings(self, server_id: int) -> dict:
         """Получить настройки сервера"""
@@ -299,13 +442,6 @@ class Database:
         )
         return [dict(r) for r in results] if results else []
     
-    def delete_tracked_role(self, tracked_role_id: int):
-        """Удалить отслеживаемую роль"""
-        self.execute(
-            'DELETE FROM tracked_roles WHERE id = %s',
-            (tracked_role_id,)
-        )
-    
     def deactivate_tracked_role(self, tracked_role_id: int):
         """Деактивировать отслеживаемую роль"""
         self.execute(
@@ -319,18 +455,29 @@ class Database:
         """Забанить пользователя"""
         unban_time = datetime.now() + timedelta(seconds=600)
         
-        self.execute('''
-            INSERT INTO banned_users 
-            (server_id, user_id, username, unban_time, reason)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (server_id, user_id) 
-            DO UPDATE SET 
-                username = EXCLUDED.username,
-                unban_time = EXCLUDED.unban_time,
-                reason = EXCLUDED.reason,
-                ban_time = CURRENT_TIMESTAMP,
-                is_unbanned = FALSE
-        ''', (server_id, user_id, username, unban_time.isoformat(), reason))
+        try:
+            self.execute('''
+                INSERT INTO banned_users 
+                (server_id, user_id, username, unban_time, reason)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (server_id, user_id) 
+                DO UPDATE SET 
+                    username = EXCLUDED.username,
+                    unban_time = EXCLUDED.unban_time,
+                    reason = EXCLUDED.reason,
+                    ban_time = CURRENT_TIMESTAMP,
+                    is_unbanned = FALSE
+            ''', (server_id, user_id, username, unban_time.isoformat(), reason))
+        except Exception as e:
+            # Для SQLite
+            if 'EXCLUDED' in str(e):
+                self.execute('''
+                    INSERT OR REPLACE INTO banned_users 
+                    (server_id, user_id, username, unban_time, reason)
+                    VALUES (%s, %s, %s, %s, %s)
+                ''', (server_id, user_id, username, unban_time.isoformat(), reason))
+            else:
+                raise
         
         result = self.execute(
             'SELECT id FROM banned_users WHERE server_id = %s AND user_id = %s',
@@ -368,7 +515,12 @@ class Database:
         return [dict(r) for r in results] if results else []
 
 # Инициализация БД
-db = Database()
+try:
+    db = Database()
+    logger.info("✅ База данных инициализирована")
+except Exception as e:
+    logger.error(f"❌ Не удалось инициализировать базу данных: {e}")
+    sys.exit(1)
 
 # ========== КОМАНДА УДАЛЕНИЯ РОЛЕЙ ==========
 class DeleteRoleView(discord.ui.View):
