@@ -66,91 +66,95 @@ class Database:
             conn.close()
     
     def init_database(self):
-        """Инициализация таблиц БД"""
+        """Инициализация таблиц БД - гарантируем создание таблиц"""
         logger.info("🔄 Инициализация таблиц БД...")
         
-        # Таблица серверов
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS servers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                discord_id TEXT UNIQUE NOT NULL,
-                name TEXT NOT NULL,
-                is_setup BOOLEAN DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Таблица настроек сервера
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS server_settings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                admin_role_1_id TEXT,
-                admin_role_2_id TEXT,
-                news_channel_id TEXT,
-                flood_channel_id TEXT,
-                tags_channel_id TEXT,
-                media_channel_id TEXT,
-                logs_channel_id TEXT,
-                high_flood_channel_id TEXT,
-                voice_channel_ids TEXT,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
-                UNIQUE(server_id)
-            )
-        ''')
-        
-        # Таблица отслеживаемых ролей
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS tracked_roles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                source_server_id TEXT NOT NULL,
-                source_server_name TEXT,
-                source_role_id TEXT NOT NULL,
-                source_role_name TEXT,
-                target_role_id TEXT,
-                target_role_name TEXT,
-                is_active BOOLEAN DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
-                UNIQUE(server_id, source_server_id, source_role_id)
-            )
-        ''')
-        
-        # Таблица пользователей с ролями
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS user_roles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                user_id TEXT NOT NULL,
-                username TEXT,
-                tracked_role_id INTEGER NOT NULL,
-                has_role BOOLEAN DEFAULT 0,
-                last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
-                FOREIGN KEY (tracked_role_id) REFERENCES tracked_roles (id) ON DELETE CASCADE,
-                UNIQUE(server_id, user_id, tracked_role_id)
-            )
-        ''')
-        
-        # Таблица забаненных пользователей
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS banned_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                user_id TEXT NOT NULL,
-                username TEXT NOT NULL,
-                ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                unban_time TIMESTAMP,
-                ban_duration INTEGER DEFAULT 600,
-                reason TEXT,
-                is_unbanned BOOLEAN DEFAULT 0,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
-                UNIQUE(server_id, user_id)
-            )
-        ''')
-        
-        logger.info("✅ Таблицы БД созданы/проверены")
+        try:
+            # Таблица серверов
+            self.execute('''
+                CREATE TABLE IF NOT EXISTS servers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discord_id TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    is_setup BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Таблица настроек сервера
+            self.execute('''
+                CREATE TABLE IF NOT EXISTS server_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL,
+                    admin_role_1_id TEXT,
+                    admin_role_2_id TEXT,
+                    news_channel_id TEXT,
+                    flood_channel_id TEXT,
+                    tags_channel_id TEXT,
+                    media_channel_id TEXT,
+                    logs_channel_id TEXT,
+                    high_flood_channel_id TEXT,
+                    voice_channel_ids TEXT,
+                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
+                    UNIQUE(server_id)
+                )
+            ''')
+            
+            # Таблица отслеживаемых ролей
+            self.execute('''
+                CREATE TABLE IF NOT EXISTS tracked_roles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL,
+                    source_server_id TEXT NOT NULL,
+                    source_server_name TEXT,
+                    source_role_id TEXT NOT NULL,
+                    source_role_name TEXT,
+                    target_role_id TEXT,
+                    target_role_name TEXT,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
+                    UNIQUE(server_id, source_server_id, source_role_id)
+                )
+            ''')
+            
+            # Таблица пользователей с ролями
+            self.execute('''
+                CREATE TABLE IF NOT EXISTS user_roles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT,
+                    tracked_role_id INTEGER NOT NULL,
+                    has_role BOOLEAN DEFAULT 0,
+                    last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
+                    FOREIGN KEY (tracked_role_id) REFERENCES tracked_roles (id) ON DELETE CASCADE,
+                    UNIQUE(server_id, user_id, tracked_role_id)
+                )
+            ''')
+            
+            # Таблица забаненных пользователей
+            self.execute('''
+                CREATE TABLE IF NOT EXISTS banned_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    unban_time TIMESTAMP,
+                    ban_duration INTEGER DEFAULT 600,
+                    reason TEXT,
+                    is_unbanned BOOLEAN DEFAULT 0,
+                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE,
+                    UNIQUE(server_id, user_id)
+                )
+            ''')
+            
+            logger.info("✅ Таблицы БД успешно созданы/проверены")
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка инициализации БД: {e}")
+            raise
     
     # ========== МЕТОДЫ ДЛЯ СЕРВЕРОВ ==========
     
@@ -322,6 +326,97 @@ class Database:
 # Инициализация БД
 db = Database()
 
+# ========== КЛАСС ДЛЯ НАСТРОЙКИ ДОСТУПА К КАНАЛАМ ==========
+class ChannelPermissions:
+    @staticmethod
+    async def setup_channel_permissions(guild: discord.Guild, channel: discord.TextChannel, 
+                                       admin_role1: discord.Role, admin_role2: discord.Role):
+        """Настройка прав доступа для канала (изначально все закрыто)"""
+        # Сбрасываем все права
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            admin_role1: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            admin_role2: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        }
+        
+        # Применяем права
+        for target, overwrite in overwrites.items():
+            await channel.set_permissions(target, overwrite=overwrite)
+    
+    @staticmethod
+    async def add_role_to_channels(guild: discord.Guild, role: discord.Role, settings: dict):
+        """Добавить роль с нужными правами ко всем каналам"""
+        if not settings:
+            logger.warning(f"⚠️ Нет настроек сервера для настройки прав роли {role.name}")
+            return
+        
+        # 1. News - только читать
+        if settings.get('news_channel_id'):
+            news_channel = guild.get_channel(int(settings['news_channel_id']))
+            if news_channel:
+                await news_channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=False,  # Только читать
+                    read_message_history=True
+                )
+                logger.info(f"✅ Добавлен доступ к news для роли {role.name} (только чтение)")
+        
+        # 2. Flood - читать и писать
+        if settings.get('flood_channel_id'):
+            flood_channel = guild.get_channel(int(settings['flood_channel_id']))
+            if flood_channel:
+                await flood_channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=True,  # Читать и писать
+                    read_message_history=True
+                )
+                logger.info(f"✅ Добавлен доступ к flood для роли {role.name} (чтение/запись)")
+        
+        # 3. Tags - только читать
+        if settings.get('tags_channel_id'):
+            tags_channel = guild.get_channel(int(settings['tags_channel_id']))
+            if tags_channel:
+                await tags_channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=False,  # Только читать
+                    read_message_history=True
+                )
+                logger.info(f"✅ Добавлен доступ к tags для роли {role.name} (только чтение)")
+        
+        # 4. Media - читать и писать
+        if settings.get('media_channel_id'):
+            media_channel = guild.get_channel(int(settings['media_channel_id']))
+            if media_channel:
+                await media_channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=True,  # Читать и писать
+                    read_message_history=True,
+                    attach_files=True
+                )
+                logger.info(f"✅ Добавлен доступ к media для роли {role.name} (чтение/запись)")
+        
+        # 5. Голосовые каналы - подключаться и говорить
+        if settings.get('voice_channel_ids'):
+            try:
+                voice_ids = json.loads(settings['voice_channel_ids'])
+                for voice_id in voice_ids:
+                    voice_channel = guild.get_channel(int(voice_id))
+                    if voice_channel:
+                        await voice_channel.set_permissions(
+                            role,
+                            view_channel=True,
+                            connect=True,  # Подключаться
+                            speak=True,    # Говорить
+                            stream=True
+                        )
+                logger.info(f"✅ Добавлен доступ к голосовым каналам для роли {role.name}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка настройки голосовых каналов: {e}")
+
 # ========== КЛАСС ДЛЯ ЛОГИРОВАНИЯ ==========
 class Logger:
     @staticmethod
@@ -363,7 +458,8 @@ class Logger:
             f"• Команда: `/{command}`\n"
             f"• Пользователь: {interaction.user.mention}\n"
             f"• ID: `{interaction.user.id}`\n"
-            f"• Канал: {interaction.channel.mention}",
+            f"• Канал: {interaction.channel.mention}\n"
+            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
             discord.Color.green()
         )
     
@@ -426,7 +522,6 @@ class Logger:
 class RoleMonitor:
     def __init__(self, bot):
         self.bot = bot
-        self.last_check = {}
     
     async def check_user_roles(self, guild: discord.Guild, user_id: int):
         """Проверить роли пользователя на отслеживаемых серверах"""
@@ -518,11 +613,12 @@ class RoleMonitor:
             if actions:
                 await Logger.log_to_channel(
                     guild,
-                    f"**🔍 Проверка пользователя**\n"
+                    f"**🔍 Автопроверка пользователя**\n"
                     f"• Пользователь: {user.mention}\n"
                     f"• ID: `{user.id}`\n"
                     f"• Статус: {'✅ Есть роли' if user_has_any_role else '❌ Нет ролей'}\n"
-                    f"• Действия: {', '.join(actions)}",
+                    f"• Действия: {', '.join(actions)}\n"
+                    f"• Время: {datetime.now().strftime('%H:%M:%S')}",
                     discord.Color.purple()
                 )
             
@@ -596,8 +692,8 @@ class RoleMonitor:
                     # Получаем только недавно не проверенных пользователей
                     members = [m for m in guild.members if not m.bot]
                     
-                    # Проверяем 5 пользователей за раз (чтобы не перегружать)
-                    for member in members[:5]:
+                    # Проверяем 3 пользователей за раз (чтобы не перегружать)
+                    for member in members[:3]:
                         if not member.bot:
                             await self.sync_user_roles(guild, member.id)
                             await asyncio.sleep(0.1)  # Маленькая задержка
@@ -624,7 +720,7 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f'🔄 Синхронизировано {len(synced)} команд')
     except Exception as e:
-        print(f'❌ Ошибка синхронизации: {e}')
+        print(f'❌ Ошибка синхронизации: {e}")
     
     # Запуск мониторинга каждые 3 секунды
     role_monitor.monitor_roles_task.start()
@@ -634,7 +730,7 @@ async def on_ready():
 @bot.tree.command(name="sett", description="Настройка сервера: создание каналов и админских ролей")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_server(interaction: discord.Interaction):
-    """Создает структуру сервера без обычных ролей"""
+    """Создает структуру сервера без обычных ролей - ВСЕ КАНАЛЫ ЗАКРЫТЫ"""
     
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -661,87 +757,56 @@ async def setup_server(interaction: discord.Interaction):
         
         logger.info(f"✅ Созданы админские роли")
         
-        # 2. БАЗОВЫЕ ПРАВА ДОСТУПА (только для админов)
+        # 2. СОЗДАНИЕ ТЕКСТОВЫХ КАНАЛОВ (ВСЕ ИЗНАЧАЛЬНО ЗАКРЫТЫ)
+        
+        # Базовые права: все закрыто, только админы видят
         base_overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             admin_role1: discord.PermissionOverwrite(view_channel=True, send_messages=True),
             admin_role2: discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
         
-        # 3. СОЗДАНИЕ ТЕКСТОВЫХ КАНАЛОВ
-        
-        # 1.1 News - видят все, пишут только админы
-        news_overwrites = base_overwrites.copy()
-        news_overwrites[guild.default_role] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=False
-        )
-        
+        # 1.1 News - создаем закрытым
         news_channel = await guild.create_text_channel(
             name="news",
             topic="📢 Новости сервера (только для чтения)",
-            overwrites=news_overwrites,
+            overwrites=base_overwrites,  # Закрытый
             reason="Канал News из команды /sett"
         )
         
-        # 1.2 Flood - видят и пишут все
-        flood_overwrites = base_overwrites.copy()
-        flood_overwrites[guild.default_role] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True
-        )
-        
+        # 1.2 Flood - создаем закрытым
         flood_channel = await guild.create_text_channel(
             name="flood",
             topic="💬 Общий чат для всех",
-            overwrites=flood_overwrites,
+            overwrites=base_overwrites,  # Закрытый
             reason="Канал Flood из команды /sett"
         )
         
-        # 1.3 Tags - админы пишут, обычные только смотрят
-        tags_overwrites = base_overwrites.copy()
-        tags_overwrites[guild.default_role] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=False
-        )
-        
+        # 1.3 Tags - создаем закрытым
         tags_channel = await guild.create_text_channel(
             name="tags",
             topic="🏷️ Теги (только для админов)",
-            overwrites=tags_overwrites,
+            overwrites=base_overwrites,  # Закрытый
             reason="Канал Tags из команды /sett"
         )
         
-        # 1.4 Media - все могут писать
-        media_overwrites = base_overwrites.copy()
-        media_overwrites[guild.default_role] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            attach_files=True
-        )
-        
+        # 1.4 Media - создаем закрытым
         media_channel = await guild.create_text_channel(
             name="media",
             topic="🖼️ Медиа-контент",
-            overwrites=media_overwrites,
+            overwrites=base_overwrites,  # Закрытый
             reason="Канал Media из команды /sett"
         )
         
-        logger.info(f"✅ Созданы публичные текстовые каналы")
+        logger.info(f"✅ Созданы текстовые каналы (все закрыты)")
         
-        # 4. ЗАКРЫТЫЕ КАНАЛЫ (ТОЛЬКО ДЛЯ АДМИНОВ)
+        # 3. ЗАКРЫТЫЕ КАНАЛЫ (ТОЛЬКО ДЛЯ АДМИНОВ)
         
-        # 1.5 Logs - только для админов (но это наш канал для логов!)
-        logs_overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            admin_role1: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            admin_role2: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        }
-        
+        # 1.5 Logs - только для админов
         logs_channel = await guild.create_text_channel(
             name="logs",
             topic="📊 Логи сервера (только для админов)",
-            overwrites=logs_overwrites,
+            overwrites=base_overwrites,
             reason="Канал Logs из команды /sett"
         )
         
@@ -749,32 +814,25 @@ async def setup_server(interaction: discord.Interaction):
         high_flood_channel = await guild.create_text_channel(
             name="high-flood",
             topic="🚨 Высокоуровневый чат (только для админов)",
-            overwrites=logs_overwrites,
+            overwrites=base_overwrites,
             reason="Канал High-flood из команды /sett"
         )
         
         logger.info(f"✅ Созданы закрытые каналы")
         
-        # 5. ГОЛОСОВЫЕ КАНАЛЫ (4 штуки)
-        voice_overwrites = base_overwrites.copy()
-        voice_overwrites[guild.default_role] = discord.PermissionOverwrite(
-            view_channel=True,
-            connect=True,
-            speak=True
-        )
-        
+        # 4. ГОЛОСОВЫЕ КАНАЛЫ (4 штуки, все закрыты)
         voice_channels = []
         for i in range(1, 5):
             voice_channel = await guild.create_voice_channel(
                 name=f"Голосовой-{i}",
-                overwrites=voice_overwrites,
+                overwrites=base_overwrites,  # Закрытый
                 reason=f"Голосовой канал {i} из команды /sett"
             )
             voice_channels.append(voice_channel)
         
-        logger.info(f"✅ Созданы голосовые каналы")
+        logger.info(f"✅ Созданы голосовые каналы (все закрыты)")
         
-        # 6. СОХРАНЕНИЕ В БАЗУ ДАННЫХ
+        # 5. СОХРАНЕНИЕ В БАЗУ ДАННЫХ
         db.mark_server_setup(str(guild.id))
         
         settings = {
@@ -790,10 +848,10 @@ async def setup_server(interaction: discord.Interaction):
         }
         db.save_server_settings(server_data['id'], settings)
         
-        # 7. ОТЧЕТ
+        # 6. ОТЧЕТ
         embed = discord.Embed(
             title="🎉 Настройка сервера завершена!",
-            description="Структура сервера создана. Теперь используйте `/serv` для добавления ролей.",
+            description="Все каналы созданы закрытыми. Добавьте роли через `/serv` чтобы открыть доступ.",
             color=discord.Color.green()
         )
         
@@ -804,24 +862,37 @@ async def setup_server(interaction: discord.Interaction):
         )
         
         embed.add_field(
-            name="💬 Текстовые каналы",
-            value=f"{news_channel.mention} - все видят, пишут админы\n"
-                  f"{flood_channel.mention} - все видят и пишут\n"
-                  f"{tags_channel.mention} - админы пишут, остальные читают\n"
-                  f"{media_channel.mention} - все могут писать и отправлять файлы",
+            name="💬 Текстовые каналы (закрыты)",
+            value=f"{news_channel.mention} - news (только чтение при добавлении роли)\n"
+                  f"{flood_channel.mention} - flood (чтение/запись при добавлении роли)\n"
+                  f"{tags_channel.mention} - tags (только чтение при добавлении роли)\n"
+                  f"{media_channel.mention} - media (чтение/запись при добавлении роли)",
             inline=False
         )
         
         embed.add_field(
-            name="🔒 Закрытые каналы",
-            value=f"{logs_channel.mention} - только для админов\n"
-                  f"{high_flood_channel.mention} - только для админов",
+            name="🔒 Закрытые каналы (только админы)",
+            value=f"{logs_channel.mention} - logs\n"
+                  f"{high_flood_channel.mention} - high-flood",
             inline=False
         )
         
         embed.add_field(
-            name="🎤 Голосовые каналы",
+            name="🎤 Голосовые каналы (закрыты)",
             value="\n".join([vc.mention for vc in voice_channels]),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📋 Что делать дальше:",
+            value="1. Используйте `/serv ID_сервера ID_роли` чтобы добавить отслеживаемую роль\n"
+                  "2. Бот создаст роль с именем сервера\n"
+                  "3. Настроит доступ к каналам согласно правам:\n"
+                  "   • News - только чтение\n"
+                  "   • Flood - чтение/запись\n"
+                  "   • Tags - только чтение\n"
+                  "   • Media - чтение/запись + файлы\n"
+                  "   • Голосовые - подключение + голос",
             inline=False
         )
         
@@ -829,19 +900,20 @@ async def setup_server(interaction: discord.Interaction):
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # 8. ЛОГИРОВАНИЕ В КАНАЛ LOGS
+        # 7. ЛОГИРОВАНИЕ В КАНАЛ LOGS
         await Logger.log_to_channel(
             guild,
             f"**🎉 Сервер настроен**\n"
             f"• Администратор: {interaction.user.mention}\n"
             f"• Создано ролей: 2 (админские)\n"
-            f"• Создано текстовых каналов: 6\n"
-            f"• Создано голосовых каналов: 4\n"
+            f"• Создано текстовых каналов: 6 (все закрыты)\n"
+            f"• Создано голосовых каналов: 4 (все закрыты)\n"
+            f"• Примечание: Все каналы закрыты. Добавляйте роли через /serv\n"
             f"• Время: {datetime.now().strftime('%H:%M:%S')}",
             discord.Color.green()
         )
         
-        logger.info(f"✅ Сервер {guild.name} настроен")
+        logger.info(f"✅ Сервер {guild.name} настроен (все каналы закрыты)")
         
     except Exception as e:
         logger.error(f"❌ Ошибка настройки: {e}")
@@ -926,43 +998,19 @@ async def add_server_role(interaction: discord.Interaction,
         
         logger.info(f"✅ Создана роль {target_role.name} для сервера {source_guild.name}")
         
-        # 2. НАСТРАИВАЕМ ДОСТУП К СУЩЕСТВУЮЩИМ КАНАЛАМ
+        # 2. НАСТРАИВАЕМ ДОСТУП К КАНАЛАМ С СООТВЕТСТВУЮЩИМИ ПРАВАМИ
         # Получаем настройки сервера
         settings = db.get_server_settings(server_data['id'])
         
-        if settings:
-            # Каналы, куда даем доступ (кроме закрытых админских)
-            channel_ids = []
-            
-            # Добавляем текстовые каналы
-            for key in ['news_channel_id', 'flood_channel_id', 'tags_channel_id', 'media_channel_id']:
-                if settings.get(key):
-                    channel_ids.append(settings[key])
-            
-            # Добавляем голосовые каналы
-            if settings.get('voice_channel_ids'):
-                try:
-                    voice_ids = json.loads(settings['voice_channel_ids'])
-                    channel_ids.extend(voice_ids)
-                except:
-                    pass
-            
-            configured_channels = 0
-            for channel_id in channel_ids:
-                if channel_id:
-                    try:
-                        channel = guild.get_channel(int(channel_id))
-                        if channel:
-                            # Разрешаем просмотр и отправку сообщений
-                            await channel.set_permissions(
-                                target_role,
-                                view_channel=True,
-                                send_messages=True,
-                                read_message_history=True
-                            )
-                            configured_channels += 1
-                    except Exception as e:
-                        logger.debug(f"⚠️ Не удалось настроить канал {channel_id}: {e}")
+        if not settings:
+            await interaction.followup.send(
+                "❌ Сервер не настроен! Сначала используйте `/sett`",
+                ephemeral=True
+            )
+            return
+        
+        # Настраиваем доступ к каналам
+        configured_channels = await ChannelPermissions.add_role_to_channels(guild, target_role, settings)
         
         # 3. СОХРАНЯЕМ В БАЗУ ДАННЫХ
         tracked_id = db.add_tracked_role(
@@ -1000,8 +1048,18 @@ async def add_server_role(interaction: discord.Interaction,
         )
         
         embed.add_field(
-            name="⚙️ Настроено",
-            value=f"• Доступ к {configured_channels} каналам\n• Мониторинг ролей включен\n• Автобан при потере роли\n• Проверка каждые 3 секунды",
+            name="🔓 Настроен доступ к каналам:",
+            value=f"• {guild.get_channel(int(settings['news_channel_id'])).mention} - **только чтение**\n"
+                  f"• {guild.get_channel(int(settings['flood_channel_id'])).mention} - **чтение и запись**\n"
+                  f"• {guild.get_channel(int(settings['tags_channel_id'])).mention} - **только чтение**\n"
+                  f"• {guild.get_channel(int(settings['media_channel_id'])).mention} - **чтение, запись, файлы**\n"
+                  f"• Голосовые каналы - **подключение и голос**",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚙️ Мониторинг",
+            value=f"• Проверка: каждые 3 секунды\n• Автобан при потере роли: 10 минут\n• Авторазбан: через 10 минут",
             inline=False
         )
         
@@ -1017,9 +1075,44 @@ async def add_server_role(interaction: discord.Interaction,
             f"• Сервер-источник: {source_guild.name}\n"
             f"• Отслеживаемая роль: {source_role.name}\n"
             f"• Созданная роль: {target_role.mention}\n"
-            f"• Настроено каналов: {configured_channels}\n"
+            f"• Настроен доступ к каналам:\n"
+            f"  - News: только чтение\n"
+            f"  - Flood: чтение/запись\n"
+            f"  - Tags: только чтение\n"
+            f"  - Media: чтение/запись + файлы\n"
+            f"  - Голосовые: подключение + голос\n"
             f"• Время: {datetime.now().strftime('%H:%M:%S')}",
             discord.Color.green()
+        )
+        
+        # 6. СРАЗУ ПРОВЕРЯЕМ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
+        await interaction.followup.send(
+            "🔄 Начинаю проверку всех пользователей...",
+            ephemeral=True
+        )
+        
+        members = [m for m in guild.members if not m.bot]
+        checked = 0
+        updated = 0
+        
+        for member in members:
+            checked += 1
+            if await role_monitor.sync_user_roles(guild, member.id):
+                updated += 1
+            await asyncio.sleep(0.1)
+        
+        await Logger.log_to_channel(
+            guild,
+            f"**🔄 Первоначальная проверка пользователей**\n"
+            f"• Проверено пользователей: {checked}\n"
+            f"• Обновлено ролей: {updated}\n"
+            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+            discord.Color.blue()
+        )
+        
+        await interaction.followup.send(
+            f"✅ Проверено {checked} пользователей, обновлено {updated}",
+            ephemeral=True
         )
         
     except Exception as e:
@@ -1351,15 +1444,17 @@ async def server_stats(interaction: discord.Interaction):
         # Мониторинг
         embed.add_field(
             name="👁️ Мониторинг",
-            value="Статус: ✅ Активен\nПроверка: каждые 3 сек\nСлед. проверка: через 3 сек",
+            value="Статус: ✅ Активен\nПроверка: каждые 3 сек",
             inline=True
         )
         
-        # Последние действия
+        # Статус каналов
+        settings = db.get_server_settings(server_data['id'])
+        channel_status = "✅ Настроены" if settings else "❌ Не настроены"
+        
         embed.add_field(
-            name="🕒 Последние данные",
-            value=f"Бот запущен: <t:{int(bot.user.created_at.timestamp())}:R>\n"
-                  f"Сервер создан: <t:{int(guild.created_at.timestamp())}:R>",
+            name="🔧 Статус каналов",
+            value=f"Каналы: {channel_status}\nДоступ: только через роли",
             inline=False
         )
         
@@ -1444,10 +1539,17 @@ if __name__ == "__main__":
     print("🚀 Запуск Discord бота...")
     print(f"📦 Версия discord.py: {discord.__version__}")
     print("⚙️ Настройки:")
+    print(f"  • Все каналы закрыты при создании")
     print(f"  • Проверка ролей: каждые 3 секунды")
     print(f"  • Автобан: 10 минут")
     print(f"  • Логирование: в канал 'logs'")
-    print(f"  • База данных: SQLite")
+    print(f"  • База данных: SQLite (таблицы создаются автоматически)")
+    print(f"  • Доступ к каналам при добавлении роли:")
+    print(f"    - News: только чтение")
+    print(f"    - Flood: чтение и запись")
+    print(f"    - Tags: только чтение")
+    print(f"    - Media: чтение, запись, файлы")
+    print(f"    - Голосовые: подключение, голос")
     
     try:
         bot.run(TOKEN)
