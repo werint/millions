@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 import logging
 import sys
+import time  # Добавляем для time.sleep
 
 # Настройка логирования
 logging.basicConfig(
@@ -91,7 +92,6 @@ class Database:
                         database_url,
                         sslmode='require',
                         cursor_factory=RealDictCursor,
-                        # Добавляем параметры для лучшей устойчивости
                         keepalives=1,
                         keepalives_idle=30,
                         keepalives_interval=10,
@@ -103,7 +103,6 @@ class Database:
                     return
                 except ImportError:
                     logger.error("❌ psycopg2 не установлен")
-                    logger.info("💡 Запустите: pip install psycopg2-binary")
                 except Exception as e:
                     logger.error(f"❌ Ошибка PostgreSQL: {e}")
             
@@ -113,19 +112,18 @@ class Database:
             self.conn = sqlite3.connect('bot_database.db', check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
             logger.info("✅ Создана SQLite база: bot_database.db")
-            logger.warning("⚠️ SQLite для разработки. Для продакшена добавьте PostgreSQL в Railway:")
             
         except Exception as e:
             logger.error(f"❌ Критическая ошибка подключения к БД: {e}")
             self.conn = None
     
-    def execute_safe(self, query, params=None, fetchone=False, fetchall=False):
-        """Безопасное выполнение SQL запроса с переподключением при ошибке"""
+    def execute(self, query, params=None, fetchone=False, fetchall=False):
+        """Безопасное выполнение SQL запроса"""
         if not self.conn:
             logger.error("❌ Нет подключения к базе данных")
             return None
         
-        max_retries = 3
+        max_retries = 2
         for attempt in range(max_retries):
             try:
                 cursor = self.conn.cursor()
@@ -146,152 +144,145 @@ class Database:
                 else:
                     result = cursor.rowcount
                 
-                # Для PostgreSQL не нужно коммитить при autocommit = True
-                if not self.use_sqlite:
-                    # PostgreSQL с autocommit
-                    pass
-                else:
-                    # SQLite нужно коммитить
+                # Для SQLite нужно коммитить
+                if self.use_sqlite:
                     self.conn.commit()
                 
                 cursor.close()
                 return result
                 
             except Exception as e:
-                cursor_error = str(e)
-                logger.error(f"❌ Ошибка SQL (попытка {attempt + 1}/{max_retries}): {cursor_error}")
+                error_msg = str(e)
+                logger.error(f"❌ Ошибка SQL (попытка {attempt + 1}/{max_retries}): {error_msg}")
                 
-                # Закрываем курсор если он открыт
                 try:
                     cursor.close()
                 except:
                     pass
                 
-                # Если это ошибка прерванной транзакции, пробуем переподключиться
-                if "current transaction is aborted" in cursor_error and not self.use_sqlite:
-                    logger.warning("⚠️ Транзакция прервана, пробую переподключиться...")
+                # Если это ошибка прерванной транзакции в PostgreSQL
+                if "current transaction is aborted" in error_msg and not self.use_sqlite:
+                    logger.warning("⚠️ Переподключаюсь к PostgreSQL...")
                     try:
                         self.conn.close()
+                        # Ждем немного перед переподключением
+                        time.sleep(1)
                         self.connect()
-                        if self.conn:
-                            continue  # Пробуем снова с новым соединением
                     except Exception as reconnect_error:
                         logger.error(f"❌ Ошибка переподключения: {reconnect_error}")
                 
-                # Если это последняя попытка или другая ошибка
                 if attempt == max_retries - 1:
-                    logger.error(f"❌ Не удалось выполнить запрос после {max_retries} попыток")
+                    logger.error(f"❌ Не удалось выполнить запрос: {query[:100]}...")
                     return None
                 
-                # Ждем перед следующей попыткой (без await, так как это синхронный метод)
-                import time
-                time.sleep(0.5 * (attempt + 1))  # Используем time.sleep вместо asyncio.sleep
+                # Ждем перед следующей попыткой
+                time.sleep(0.5)
         
         return None
     
-    # Заменяем старый метод execute на безопасный
-    execute = execute_safe
-    
     def init_database(self):
-        """Инициализация таблиц БД (если не существуют)"""
+        """Инициализация таблиц БД"""
         if not self.conn:
-            logger.error("❌ Нет подключения к БД для инициализации")
+            logger.error("❌ Нет подключения к БД")
             return
         
         logger.info("🔄 Проверка таблиц в базе данных...")
         
-        try:
-            # Таблица серверов
-            self.execute('''
-                CREATE TABLE IF NOT EXISTS servers (
-                    id SERIAL PRIMARY KEY,
-                    discord_id VARCHAR(255) UNIQUE NOT NULL,
-                    name VARCHAR(255) NOT NULL,
-                    is_setup BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
+        # Простые запросы без сложных ограничений
+        tables = [
+            '''CREATE TABLE IF NOT EXISTS servers (
+                id SERIAL PRIMARY KEY,
+                discord_id VARCHAR(255) NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                is_setup BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
             
-            # Таблица настроек сервера
-            self.execute('''
-                CREATE TABLE IF NOT EXISTS server_settings (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    admin_role_1_id VARCHAR(255),
-                    admin_role_2_id VARCHAR(255),
-                    news_channel_id VARCHAR(255),
-                    flood_channel_id VARCHAR(255),
-                    tags_channel_id VARCHAR(255),
-                    media_channel_id VARCHAR(255),
-                    logs_channel_id VARCHAR(255),
-                    high_flood_channel_id VARCHAR(255),
-                    voice_channel_ids TEXT,
-                    high_voice_channel_id VARCHAR(255),
-                    main_category_id VARCHAR(255),
-                    high_category_id VARCHAR(255),
-                    UNIQUE(server_id)
-                )
-            ''')
+            '''CREATE TABLE IF NOT EXISTS server_settings (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                admin_role_1_id VARCHAR(255),
+                admin_role_2_id VARCHAR(255),
+                news_channel_id VARCHAR(255),
+                flood_channel_id VARCHAR(255),
+                tags_channel_id VARCHAR(255),
+                media_channel_id VARCHAR(255),
+                logs_channel_id VARCHAR(255),
+                high_flood_channel_id VARCHAR(255),
+                voice_channel_ids TEXT,
+                high_voice_channel_id VARCHAR(255),
+                main_category_id VARCHAR(255),
+                high_category_id VARCHAR(255)
+            )''',
             
-            # Таблица отслеживаемых ролей
-            self.execute('''
-                CREATE TABLE IF NOT EXISTS tracked_roles (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    source_server_id VARCHAR(255) NOT NULL,
-                    source_server_name VARCHAR(255),
-                    source_role_id VARCHAR(255) NOT NULL,
-                    source_role_name VARCHAR(255),
-                    target_role_id VARCHAR(255),
-                    target_role_name VARCHAR(255),
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(server_id, source_server_id, source_role_id)
-                )
-            ''')
+            '''CREATE TABLE IF NOT EXISTS tracked_roles (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                source_server_id VARCHAR(255) NOT NULL,
+                source_server_name VARCHAR(255),
+                source_role_id VARCHAR(255) NOT NULL,
+                source_role_name VARCHAR(255),
+                target_role_id VARCHAR(255),
+                target_role_name VARCHAR(255),
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
             
-            # Таблица пользователей с ролями
-            self.execute('''
-                CREATE TABLE IF NOT EXISTS user_roles (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    user_id VARCHAR(255) NOT NULL,
-                    username VARCHAR(255),
-                    tracked_role_id INTEGER NOT NULL,
-                    has_role BOOLEAN DEFAULT FALSE,
-                    last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(server_id, user_id, tracked_role_id)
-                )
-            ''')
+            '''CREATE TABLE IF NOT EXISTS user_roles (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                user_id VARCHAR(255) NOT NULL,
+                username VARCHAR(255),
+                tracked_role_id INTEGER NOT NULL,
+                has_role BOOLEAN DEFAULT FALSE,
+                last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
             
-            # Таблица забаненных пользователей
-            self.execute('''
-                CREATE TABLE IF NOT EXISTS banned_users (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    user_id VARCHAR(255) NOT NULL,
-                    username VARCHAR(255) NOT NULL,
-                    ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    unban_time TIMESTAMP,
-                    ban_duration INTEGER DEFAULT 600,
-                    reason TEXT,
-                    is_unbanned BOOLEAN DEFAULT FALSE,
-                    UNIQUE(server_id, user_id)
-                )
-            ''')
-            
-            logger.info("✅ Таблицы базы данных успешно проверены")
-            
-            # Проверяем соединение
-            test_result = self.execute('SELECT 1 as test', fetchone=True)
-            if test_result:
-                db_type = "SQLite" if self.use_sqlite else "PostgreSQL"
-                logger.info(f"✅ Тест подключения к {db_type} пройден")
-            else:
-                logger.warning("⚠️ Тест подключения к БД не пройден")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка проверки таблиц: {e}")
+            '''CREATE TABLE IF NOT EXISTS banned_users (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                user_id VARCHAR(255) NOT NULL,
+                username VARCHAR(255) NOT NULL,
+                ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                unban_time TIMESTAMP,
+                ban_duration INTEGER DEFAULT 600,
+                reason TEXT,
+                is_unbanned BOOLEAN DEFAULT FALSE
+            )'''
+        ]
+        
+        for table_sql in tables:
+            try:
+                self.execute(table_sql)
+            except Exception as e:
+                logger.error(f"❌ Ошибка создания таблицы: {e}")
+        
+        logger.info("✅ Проверка таблиц завершена")
+        
+        # Создаем индексы отдельно
+        indexes = []
+        if not self.use_sqlite:
+            # Индексы для PostgreSQL
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_servers_discord_id ON servers(discord_id)",
+                "CREATE INDEX IF NOT EXISTS idx_tracked_roles_server ON tracked_roles(server_id, source_server_id, source_role_id)",
+                "CREATE INDEX IF NOT EXISTS idx_user_roles_server_user ON user_roles(server_id, user_id, tracked_role_id)",
+                "CREATE INDEX IF NOT EXISTS idx_banned_users_server_user ON banned_users(server_id, user_id)"
+            ]
+        else:
+            # Индексы для SQLite
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_servers_discord_id ON servers(discord_id)",
+                "CREATE INDEX IF NOT EXISTS idx_tracked_roles_server ON tracked_roles(server_id, source_server_id, source_role_id)",
+                "CREATE INDEX IF NOT EXISTS idx_user_roles_server_user ON user_roles(server_id, user_id, tracked_role_id)",
+                "CREATE INDEX IF NOT EXISTS idx_banned_users_server_user ON banned_users(server_id, user_id)"
+            ]
+        
+        for index_sql in indexes:
+            try:
+                self.execute(index_sql)
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка создания индекса: {e}")
     
     # ========== МЕТОДЫ ДЛЯ СЕРВЕРОВ ==========
     
@@ -320,8 +311,7 @@ class Database:
             else:
                 self.execute(
                     '''INSERT INTO servers (discord_id, name) 
-                       VALUES (%s, %s)
-                       ON CONFLICT (discord_id) DO NOTHING''',
+                       VALUES (%s, %s)''',
                     (discord_id, name)
                 )
         except Exception as e:
@@ -460,41 +450,21 @@ class Database:
         
         # Создаем новую
         try:
-            # Для PostgreSQL используем ON CONFLICT
-            if not self.use_sqlite:
-                self.execute('''
-                    INSERT INTO tracked_roles 
-                    (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (server_id, source_server_id, source_role_id) 
-                    DO UPDATE SET is_active = TRUE
-                    RETURNING id
-                ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
-                
-                # Получаем ID из результата
-                result = self.execute(
-                    '''SELECT id FROM tracked_roles 
-                       WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
-                    (server_id, source_server_id, source_role_id),
-                    fetchone=True
-                )
-            else:
-                # Для SQLite
-                self.execute('''
-                    INSERT OR IGNORE INTO tracked_roles 
-                    (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
-                    VALUES (%s, %s, %s, %s, %s)
-                ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
-                
-                result = self.execute(
-                    '''SELECT id FROM tracked_roles 
-                       WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
-                    (server_id, source_server_id, source_role_id),
-                    fetchone=True
-                )
+            self.execute('''
+                INSERT INTO tracked_roles 
+                (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
+                VALUES (%s, %s, %s, %s, %s)
+            ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
         except Exception as e:
             logger.error(f"❌ Ошибка добавления роли: {e}")
             return None
+        
+        result = self.execute(
+            '''SELECT id FROM tracked_roles 
+               WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
+            (server_id, source_server_id, source_role_id),
+            fetchone=True
+        )
         
         return result['id'] if result else None
     
@@ -622,7 +592,6 @@ try:
 except Exception as e:
     logger.error(f"❌ Не удалось инициализировать базу данных: {e}")
     logger.warning("⚠️ Продолжаю работу без базы данных. Некоторые функции могут не работать.")
-    # Создаем пустой объект
     db = None
 
 # ========== ПАНЕЛЬ УПРАВЛЕНИЯ ==========
@@ -710,7 +679,27 @@ class AddRoleModal(discord.ui.Modal, title="Добавить отслежива�
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        await add_server_role_command(interaction, self.server_id.value, self.role_id.value)
+        # Для модальных окон НЕЛЬЗЯ использовать defer или followup
+        # Нужно использовать оригинальный response или новое сообщение
+        try:
+            # Отправляем сообщение об обработке
+            await interaction.response.send_message("🔄 Обрабатываю запрос...", ephemeral=True)
+            
+            # Даем время на отправку сообщения
+            await asyncio.sleep(0.5)
+            
+            # Запускаем асинхронную задачу для добавления роли
+            await add_server_role_command(interaction, self.server_id.value, self.role_id.value)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в модальном окне: {e}")
+            # Если не удалось отправить response, пробуем редактировать
+            try:
+                await interaction.edit_original_response(
+                    content=f"❌ Ошибка: {str(e)[:100]}..."
+                )
+            except:
+                pass
 
 class UnbanModal(discord.ui.Modal, title="Разблокировать пользователя"):
     """Модальное окно для разбана"""
@@ -1411,41 +1400,59 @@ async def setup_server_command(interaction: discord.Interaction):
 async def add_server_role_command(interaction: discord.Interaction, source_server_id: str, source_role_id: str):
     """Добавить отслеживаемую роль"""
     try:
+        # Обновляем сообщение о прогрессе
+        await interaction.edit_original_response(content="🔄 Проверяю данные...")
+        
         if not db or not db.conn:
-            await interaction.followup.send(
-                "❌ Ошибка базы данных. Проверьте подключение к PostgreSQL.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content="❌ Ошибка базы данных. Проверьте подключение к PostgreSQL."
             )
             return
-        
-        await Logger.log_command(interaction, "Добавить роль")
         
         guild = interaction.guild
         
         if not source_server_id.isdigit() or not source_role_id.isdigit():
-            await interaction.followup.send("❌ ID должны быть числовыми", ephemeral=True)
+            await interaction.edit_original_response(
+                content="❌ ID должны быть числовыми"
+            )
             return
+        
+        await interaction.edit_original_response(content="🔄 Ищу сервер-источник...")
         
         source_guild = bot.get_guild(int(source_server_id))
         if not source_guild:
-            await interaction.followup.send("❌ Сервер-источник не найден", ephemeral=True)
+            await interaction.edit_original_response(
+                content="❌ Сервер-источник не найден. Убедитесь, что бот есть на этом сервере."
+            )
             return
+        
+        await interaction.edit_original_response(content="🔄 Ищу роль на сервере-источнике...")
         
         source_role = source_guild.get_role(int(source_role_id))
         if not source_role:
-            await interaction.followup.send("❌ Роль не найдена", ephemeral=True)
+            await interaction.edit_original_response(
+                content="❌ Роль не найдена на сервере-источнике"
+            )
             return
+        
+        await interaction.edit_original_response(content="🔄 Проверяю, не добавлена ли уже эта роль...")
         
         server_data = db.get_or_create_server(str(guild.id), guild.name)
         if not server_data:
-            await interaction.followup.send("❌ Ошибка сервера в базе данных", ephemeral=True)
+            await interaction.edit_original_response(
+                content="❌ Ошибка сервера в базе данных"
+            )
             return
         
         tracked_roles = db.get_tracked_roles(server_data['id'])
         for role in tracked_roles:
             if role['source_server_id'] == source_server_id and role['source_role_id'] == source_role_id:
-                await interaction.followup.send("❌ Роль уже отслеживается", ephemeral=True)
+                await interaction.edit_original_response(
+                    content="❌ Эта роль уже отслеживается"
+                )
                 return
+        
+        await interaction.edit_original_response(content="🔄 Проверяю существующие роли для этого сервера...")
         
         existing_target_role = None
         existing_roles_for_server = []
@@ -1462,7 +1469,9 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
         if existing_target_role:
             target_role = existing_target_role
             logger.info(f"♻️ Использую существующую роль {target_role.name}")
+            await interaction.edit_original_response(content="🔄 Использую существующую роль...")
         else:
+            await interaction.edit_original_response(content="🔄 Создаю новую роль...")
             role_name = source_guild.name[:32]
             target_role = await guild.create_role(
                 name=role_name,
@@ -1478,15 +1487,22 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
             )
             logger.info(f"✅ Создана новая роль {target_role.name}")
         
+        await interaction.edit_original_response(content="🔄 Получаю настройки сервера...")
+        
         settings = db.get_server_settings(server_data['id'])
         
         if not settings:
-            await interaction.followup.send("❌ Сервер не настроен", ephemeral=True)
+            await interaction.edit_original_response(
+                content="❌ Сервер не настроен. Сначала используйте 'Настройка сервера'"
+            )
             return
         
         configured_count = 0
         if not existing_target_role:
+            await interaction.edit_original_response(content="🔄 Настраиваю доступ к каналам...")
             configured_count = await ChannelPermissions.add_role_to_channels(guild, target_role, settings)
+        
+        await interaction.edit_original_response(content="🔄 Сохраняю в базу данных...")
         
         tracked_id = db.add_tracked_role(
             server_data['id'],
@@ -1499,6 +1515,7 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
         if tracked_id:
             db.update_target_role(tracked_id, str(target_role.id), target_role.name)
         
+        # Создаем финальный embed
         embed = discord.Embed(
             title="✅ Роль добавлена для отслеживания",
             color=discord.Color.green()
@@ -1529,8 +1546,10 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
                 inline=False
             )
         
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Обновляем сообщение с embed
+        await interaction.edit_original_response(content=None, embed=embed)
         
+        # Логируем действие
         if existing_target_role:
             action_type = "🔄 Добавлена дополнительная отслеживаемая роль"
         else:
@@ -1548,7 +1567,18 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
         
     except Exception as e:
         logger.error(f"❌ Ошибка добавления роли: {e}")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)[:200]}", ephemeral=True)
+        try:
+            await interaction.edit_original_response(
+                content=f"❌ Ошибка: {str(e)[:200]}"
+            )
+        except:
+            try:
+                await interaction.followup.send(
+                    f"❌ Ошибка: {str(e)[:200]}",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 async def remove_tracked_role_command(interaction: discord.Interaction):
     """Удалить отслеживаемую роль"""
@@ -1986,16 +2016,26 @@ async def on_ready():
     print(f'🆔 ID бота: {bot.user.id}')
     print(f'📊 Серверов: {len(bot.guilds)}')
     
-    try:
-        synced = await bot.tree.sync()
-        print(f'🔄 Синхронизировано команд: {len(synced)}')
-    except Exception as e:
-        print(f'❌ Ошибка синхронизации: {e}')
+    # Пробуем несколько раз синхронизировать команды
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f'🔄 Попытка синхронизации команд #{attempt + 1}...')
+            synced = await bot.tree.sync()
+            print(f'✅ Синхронизировано команд: {len(synced)}')
+            break
+        except Exception as e:
+            print(f'❌ Ошибка синхронизации #{attempt + 1}: {e}')
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
     
     # Запускаем мониторинг только если БД работает
     if db and db.conn:
-        role_monitor.monitor_roles_task.start()
-        print('👁️ Мониторинг ролей запущен (каждые 3 секунды)')
+        try:
+            role_monitor.monitor_roles_task.start()
+            print('👁️ Мониторинг ролей запущен (каждые 3 секунды)')
+        except Exception as e:
+            print(f'❌ Ошибка запуска мониторинга: {e}')
     else:
         print('⚠️ Мониторинг ролей отключен (проблемы с БД)')
 
