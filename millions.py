@@ -331,10 +331,18 @@ class Database:
             logger.error("❌ Нет подключения к БД")
             return
         
-        self.execute(
-            'UPDATE servers SET is_setup = TRUE WHERE discord_id = %s',
-            (discord_id,)
+        logger.info(f"📝 Отмечаю сервер {discord_id} как настроенный")
+        
+        result = self.execute(
+            'UPDATE servers SET is_setup = TRUE WHERE discord_id = %s RETURNING *',
+            (discord_id,),
+            fetchone=True
         )
+        
+        if result:
+            logger.info(f"✅ Сервер {discord_id} отмечен как настроенный")
+        else:
+            logger.error(f"❌ Не удалось отметить сервер {discord_id} как настроенный")
     
     # ========== МЕТОДЫ ДЛЯ НАСТРОЕК ==========
     
@@ -407,6 +415,8 @@ class Database:
                     settings.get('main_category_id'),
                     settings.get('high_category_id')
                 ))
+            
+            logger.info(f"✅ Настройки сервера {server_id} сохранены")
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения настроек: {e}")
     
@@ -1311,7 +1321,15 @@ async def setup_server_command(interaction: discord.Interaction):
             'main_category_id': str(main_category.id),
             'high_category_id': str(high_category.id)
         }
+
+        logger.info(f"💾 Сохраняю настройки для server_id: {server_data['id']}")
+        logger.info(f"📋 Настройки: {json.dumps(settings, indent=2)}")
+
         db.save_server_settings(server_data['id'], settings)
+        
+        # Проверяем сохранение
+        saved_settings = db.get_server_settings(server_data['id'])
+        logger.info(f"✅ Проверка сохранения: {saved_settings}")
         
         # 6. СОЗДАЕМ ФИНАЛЬНЫЙ ОТЧЕТ
         embed = discord.Embed(
@@ -1411,6 +1429,39 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
         
         guild = interaction.guild
         
+
+        # Проверяем, настроен ли сервер
+        server_data = db.get_or_create_server(str(guild.id), guild.name)
+        if not server_data:
+            await interaction.edit_original_response(
+                content="❌ Ошибка сервера в базе данных"
+            )
+            return
+                # ПРОВЕРКА 2: Сервер должен быть настроен
+        logger.info(f"🔍 Проверяю настройку сервера: is_setup = {server_data.get('is_setup')}")
+        
+        if not server_data.get('is_setup'):
+            await interaction.edit_original_response(
+                content="❌ Сервер не настроен! Сначала нажмите кнопку '⚙️ Настройка сервера'"
+            )
+            return
+        
+        # ПРОВЕРКА 3: Настройки сервера должны существовать
+        settings = db.get_server_settings(server_data['id'])
+        logger.info(f"🔍 Настройки сервера: {settings}")
+        
+        if not settings:
+            await interaction.edit_original_response(
+                content="❌ Настройки сервера не найдены! Возможно, настройка не завершена полностью."
+            )
+            return
+        # ПРОВЕРЯЕМ, НАСТРОЕН ЛИ СЕРВЕР
+        if not server_data.get('is_setup'):
+            await interaction.edit_original_response(
+                content="❌ Сервер не настроен. Сначала используйте кнопку '⚙️ Настройка сервера'"
+            )
+            return
+        
         if not source_server_id.isdigit() or not source_role_id.isdigit():
             await interaction.edit_original_response(
                 content="❌ ID должны быть числовыми"
@@ -1436,13 +1487,6 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
             return
         
         await interaction.edit_original_response(content="🔄 Проверяю, не добавлена ли уже эта роль...")
-        
-        server_data = db.get_or_create_server(str(guild.id), guild.name)
-        if not server_data:
-            await interaction.edit_original_response(
-                content="❌ Ошибка сервера в базе данных"
-            )
-            return
         
         tracked_roles = db.get_tracked_roles(server_data['id'])
         for role in tracked_roles:
@@ -1493,7 +1537,7 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
         
         if not settings:
             await interaction.edit_original_response(
-                content="❌ Сервер не настроен. Сначала используйте 'Настройка сервера'"
+                content="❌ Настройки сервера не найдены. Возможно, сервер не был настроен правильно."
             )
             return
         
