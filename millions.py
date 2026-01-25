@@ -1799,12 +1799,12 @@ async def server_stats_command(interaction: discord.Interaction):
 async def souz_command(interaction: discord.Interaction):
     """Главная панель управления ботом"""
     
-    # Отвечаем немедленно чтобы избежать ошибки Unknown interaction
-    await interaction.response.defer(ephemeral=False)
-    
     try:
-        # Даем время на обработку
-        await asyncio.sleep(0.5)
+        # ОТВЕЧАЕМ НЕМЕДЛЕННО - это самое важное!
+        await interaction.response.defer(ephemeral=False)
+        
+        # Даем небольшое время для стабильности
+        await asyncio.sleep(0.1)
         
         # Создаем основной embed
         embed = discord.Embed(
@@ -1893,12 +1893,24 @@ async def souz_command(interaction: discord.Interaction):
         
     except Exception as e:
         logger.error(f"❌ Ошибка команды souz: {e}")
-        # Если не удалось отправить через followup, пытаемся через оригинальное взаимодействие
+        
+        # Пробуем отправить сообщение об ошибке разными способами
         try:
-            await interaction.followup.send(
-                f"❌ Ошибка при создании панели управления: {str(e)[:100]}...",
-                ephemeral=True
-            )
+            # Если interaction.response еще доступен
+            try:
+                await interaction.response.send_message(
+                    f"❌ Ошибка при создании панели управления: {str(e)[:100]}...",
+                    ephemeral=True
+                )
+            except:
+                # Если уже использовали response, пробуем followup
+                try:
+                    await interaction.followup.send(
+                        f"❌ Ошибка: {str(e)[:100]}...",
+                        ephemeral=True
+                    )
+                except:
+                    pass
         except:
             pass
 
