@@ -183,8 +183,9 @@ class Database:
                     logger.error(f"❌ Не удалось выполнить запрос после {max_retries} попыток")
                     return None
                 
-                # Ждем перед следующей попыткой
-                await asyncio.sleep(0.5 * (attempt + 1))
+                # Ждем перед следующей попыткой (без await, так как это синхронный метод)
+                import time
+                time.sleep(0.5 * (attempt + 1))  # Используем time.sleep вместо asyncio.sleep
         
         return None
     
