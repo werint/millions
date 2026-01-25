@@ -436,7 +436,6 @@ except Exception as e:
     logger.error(f"❌ Не удалось инициализировать базу данных: {e}")
     sys.exit(1)
 
-# ========== ПАНЕЛЬ УПРАВЛЕНИЯ ==========
 class ControlPanelView(discord.ui.View):
     """Панель управления ботом"""
     def __init__(self):
@@ -521,7 +520,7 @@ class AddRoleModal(discord.ui.Modal, title="Добавить отслежива�
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        # Модальные окна уже обрабатывают response, так что не нужно defer
         await add_server_role_command(interaction, self.server_id.value, self.role_id.value)
 
 class UnbanModal(discord.ui.Modal, title="Разблокировать пользователя"):
@@ -534,7 +533,6 @@ class UnbanModal(discord.ui.Modal, title="Разблокировать поль�
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
         await unban_user_command(interaction, self.user_id.value)
 
 # ========== КЛАСС ДЛЯ НАСТРОЙКИ ДОСТУПА К КАНАЛАМ ==========
@@ -929,10 +927,13 @@ role_monitor = RoleMonitor(bot)
 # ========== КОМАНДЫ В ВИДЕ ФУНКЦИЙ ==========
 async def setup_server_command(interaction: discord.Interaction):
     """Настройка сервера"""
-    guild = interaction.guild
-    
     try:
         await Logger.log_command(interaction, "Настройка сервера")
+        
+        guild = interaction.guild
+        
+        # ОТПРАВЛЯЕМ ВРЕМЕННОЕ СООБЩЕНИЕ СРАЗУ
+        await interaction.followup.send("🔄 Начинаю настройку сервера...", ephemeral=True)
         
         server_data = db.get_or_create_server(str(guild.id), guild.name)
         logger.info(f"🔧 Настройка сервера: {guild.name}")
@@ -953,6 +954,9 @@ async def setup_server_command(interaction: discord.Interaction):
         )
         
         logger.info(f"✅ Созданы админские роли Own и High")
+        
+        # ОБНОВЛЯЕМ СООБЩЕНИЕ
+        await interaction.edit_original_response(content="🔄 Создаю категории...")
         
         # 2. СОЗДАНИЕ КАТЕГОРИЙ
         # Категория Main
@@ -976,6 +980,9 @@ async def setup_server_command(interaction: discord.Interaction):
         
         await main_category.set_permissions(guild.default_role, view_channel=False)
         await high_category.set_permissions(guild.default_role, view_channel=False)
+        
+        # ОБНОВЛЯЕМ СООБЩЕНИЕ
+        await interaction.edit_original_response(content="🔄 Создаю каналы в категории MAIN...")
         
         # 3. СОЗДАНИЕ КАНАЛОВ В КАТЕГОРИИ MAIN
         # News
@@ -1006,6 +1013,9 @@ async def setup_server_command(interaction: discord.Interaction):
             overwrites=base_overwrites
         )
         
+        # ОБНОВЛЯЕМ СООБЩЕНИЕ
+        await interaction.edit_original_response(content="🔄 Создаю голосовые каналы...")
+        
         # Голосовые каналы
         voice_channels = []
         for i in range(1, 5):
@@ -1014,6 +1024,9 @@ async def setup_server_command(interaction: discord.Interaction):
                 overwrites=base_overwrites
             )
             voice_channels.append(voice_channel)
+        
+        # ОБНОВЛЯЕМ СООБЩЕНИЕ
+        await interaction.edit_original_response(content="🔄 Создаю каналы в категории HIGH...")
         
         # 4. СОЗДАНИЕ КАНАЛОВ В КАТЕГОРИИ HIGH
         # Logs
@@ -1042,6 +1055,9 @@ async def setup_server_command(interaction: discord.Interaction):
             overwrites=high_voice_overwrites
         )
         
+        # ОБНОВЛЯЕМ СООБЩЕНИЕ
+        await interaction.edit_original_response(content="🔄 Сохраняю настройки в базу данных...")
+        
         # 5. СОХРАНЕНИЕ В БАЗУ ДАННЫХ
         db.mark_server_setup(str(guild.id))
         
@@ -1061,7 +1077,7 @@ async def setup_server_command(interaction: discord.Interaction):
         }
         db.save_server_settings(server_data['id'], settings)
         
-        # 6. ОТЧЕТ
+        # 6. СОЗДАЕМ ФИНАЛЬНЫЙ ОТЧЕТ
         embed = discord.Embed(
             title="🎉 Настройка сервера завершена!",
             description="Все каналы созданы и сгруппированы по категориям.",
@@ -1092,7 +1108,16 @@ async def setup_server_command(interaction: discord.Interaction):
             inline=True
         )
         
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.add_field(
+            name="📋 Что делать дальше:",
+            value="1. Используйте кнопку **'➕ Добавить роль'** чтобы добавить отслеживаемые роли\n"
+                  "2. Используйте кнопку **'🔄 Синхронизация'** для проверки всех пользователей\n"
+                  "3. Бот будет автоматически проверять роли каждые 3 секунды",
+            inline=False
+        )
+        
+        # ЗАМЕНЯЕМ ТЕКСТОВОЕ СООБЩЕНИЕ НА EMBED
+        await interaction.edit_original_response(content=None, embed=embed)
         
         # 7. ЛОГИРОВАНИЕ
         await Logger.log_to_channel(
@@ -1110,10 +1135,31 @@ async def setup_server_command(interaction: discord.Interaction):
         
     except Exception as e:
         logger.error(f"❌ Ошибка настройки: {e}")
-        await interaction.followup.send(
-            f"❌ Ошибка при настройке сервера: {str(e)}",
-            ephemeral=True
+        
+        # СОЗДАЕМ EMBED С ОШИБКОЙ
+        error_embed = discord.Embed(
+            title="❌ Ошибка при настройке сервера",
+            description=f"```{str(e)[:1000]}...```",
+            color=discord.Color.red()
         )
+        
+        error_embed.add_field(
+            name="💡 Возможные причины:",
+            value="• У бота недостаточно прав\n"
+                  "• На сервере достигнут лимит каналов\n"
+                  "• Проблемы с подключением к Discord",
+            inline=False
+        )
+        
+        try:
+            # Пытаемся обновить сообщение с ошибкой
+            await interaction.edit_original_response(content=None, embed=error_embed)
+        except:
+            # Если не получается, отправляем новое сообщение
+            try:
+                await interaction.followup.send(embed=error_embed, ephemeral=True)
+            except:
+                pass
 
 async def add_server_role_command(interaction: discord.Interaction, source_server_id: str, source_role_id: str):
     """Добавить отслеживаемую роль"""
@@ -1503,7 +1549,13 @@ async def server_stats_command(interaction: discord.Interaction):
 async def souz_command(interaction: discord.Interaction):
     """Главная панель управления ботом"""
     
+    # Отвечаем немедленно чтобы избежать ошибки Unknown interaction
+    await interaction.response.defer(ephemeral=False)
+    
     try:
+        # Даем время на обработку
+        await asyncio.sleep(0.5)
+        
         # Создаем основной embed
         embed = discord.Embed(
             title="🤝 **ДОБРО ПОЖАЛОВАТЬ В СОЮЗНЫЙ БОТ!**",
@@ -1572,21 +1624,33 @@ async def souz_command(interaction: discord.Interaction):
         )
         
         embed.set_footer(text="Для получения помощи обращайтесь к разработчику")
-        embed.set_thumbnail(url=bot.user.avatar.url if bot.user.avatar else None)
         
-        # Отправляем embed с панелью управления
+        # Получаем аватар бота
+        try:
+            if bot.user and bot.user.avatar:
+                embed.set_thumbnail(url=bot.user.avatar.url)
+        except:
+            pass
+        
+        # Создаем панель управления
         view = ControlPanelView()
-        await interaction.response.send_message(embed=embed, view=view)
+        
+        # Отправляем сообщение через followup после defer
+        await interaction.followup.send(embed=embed, view=view)
         
         # Логируем команду
         await Logger.log_command(interaction, "souz")
         
     except Exception as e:
         logger.error(f"❌ Ошибка команды souz: {e}")
-        await interaction.response.send_message(
-            f"❌ Ошибка: {str(e)}",
-            ephemeral=True
-        )
+        # Если не удалось отправить через followup, пытаемся через оригинальное взаимодействие
+        try:
+            await interaction.followup.send(
+                f"❌ Ошибка при создании панели управления: {str(e)[:100]}...",
+                ephemeral=True
+            )
+        except:
+            pass
 
 # ========== СОБЫТИЯ БОТА ==========
 @bot.event
