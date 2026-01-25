@@ -90,8 +90,15 @@ class Database:
                     self.conn = psycopg2.connect(
                         database_url,
                         sslmode='require',
-                        cursor_factory=RealDictCursor
+                        cursor_factory=RealDictCursor,
+                        # Добавляем параметры для лучшей устойчивости
+                        keepalives=1,
+                        keepalives_idle=30,
+                        keepalives_interval=10,
+                        keepalives_count=5
                     )
+                    # Автоматический коммит для PostgreSQL
+                    self.conn.autocommit = True
                     logger.info("✅ Подключено к PostgreSQL (Railway)")
                     return
                 except ImportError:
@@ -103,7 +110,7 @@ class Database:
             logger.info("🔄 Использую SQLite как временное решение...")
             import sqlite3
             self.use_sqlite = True
-            self.conn = sqlite3.connect('bot_database.db')
+            self.conn = sqlite3.connect('bot_database.db', check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
             logger.info("✅ Создана SQLite база: bot_database.db")
             logger.warning("⚠️ SQLite для разработки. Для продакшена добавьте PostgreSQL в Railway:")
@@ -112,40 +119,77 @@ class Database:
             logger.error(f"❌ Критическая ошибка подключения к БД: {e}")
             self.conn = None
     
-    def execute(self, query, params=None, fetchone=False, fetchall=False, commit=True):
-        """Выполнение SQL запроса"""
+    def execute_safe(self, query, params=None, fetchone=False, fetchall=False):
+        """Безопасное выполнение SQL запроса с переподключением при ошибке"""
         if not self.conn:
             logger.error("❌ Нет подключения к базе данных")
             return None
         
-        try:
-            cursor = self.conn.cursor()
-            
-            if self.use_sqlite:
-                query = query.replace('%s', '?')
-                query = query.replace('SERIAL', 'INTEGER')
-                query = query.replace('VARCHAR', 'TEXT')
-                query = query.replace('BOOLEAN', 'INTEGER')
-                query = query.replace('TIMESTAMP DEFAULT CURRENT_TIMESTAMP', 'TIMESTAMP')
-            
-            cursor.execute(query, params or ())
-            
-            if fetchone:
-                result = cursor.fetchone()
-            elif fetchall:
-                result = cursor.fetchall()
-            else:
-                result = cursor.rowcount
-            
-            if commit:
-                self.conn.commit()
-            
-            cursor.close()
-            return result
-        except Exception as e:
-            logger.error(f"❌ Ошибка SQL: {e}")
-            logger.error(f"Запрос: {query[:100]}...")
-            return None
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                cursor = self.conn.cursor()
+                
+                if self.use_sqlite:
+                    query = query.replace('%s', '?')
+                    query = query.replace('SERIAL', 'INTEGER')
+                    query = query.replace('VARCHAR', 'TEXT')
+                    query = query.replace('BOOLEAN', 'INTEGER')
+                    query = query.replace('TIMESTAMP DEFAULT CURRENT_TIMESTAMP', 'TIMESTAMP')
+                
+                cursor.execute(query, params or ())
+                
+                if fetchone:
+                    result = cursor.fetchone()
+                elif fetchall:
+                    result = cursor.fetchall()
+                else:
+                    result = cursor.rowcount
+                
+                # Для PostgreSQL не нужно коммитить при autocommit = True
+                if not self.use_sqlite:
+                    # PostgreSQL с autocommit
+                    pass
+                else:
+                    # SQLite нужно коммитить
+                    self.conn.commit()
+                
+                cursor.close()
+                return result
+                
+            except Exception as e:
+                cursor_error = str(e)
+                logger.error(f"❌ Ошибка SQL (попытка {attempt + 1}/{max_retries}): {cursor_error}")
+                
+                # Закрываем курсор если он открыт
+                try:
+                    cursor.close()
+                except:
+                    pass
+                
+                # Если это ошибка прерванной транзакции, пробуем переподключиться
+                if "current transaction is aborted" in cursor_error and not self.use_sqlite:
+                    logger.warning("⚠️ Транзакция прервана, пробую переподключиться...")
+                    try:
+                        self.conn.close()
+                        self.connect()
+                        if self.conn:
+                            continue  # Пробуем снова с новым соединением
+                    except Exception as reconnect_error:
+                        logger.error(f"❌ Ошибка переподключения: {reconnect_error}")
+                
+                # Если это последняя попытка или другая ошибка
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ Не удалось выполнить запрос после {max_retries} попыток")
+                    return None
+                
+                # Ждем перед следующей попыткой
+                await asyncio.sleep(0.5 * (attempt + 1))
+        
+        return None
+    
+    # Заменяем старый метод execute на безопасный
+    execute = execute_safe
     
     def init_database(self):
         """Инициализация таблиц БД (если не существуют)"""
@@ -247,7 +291,6 @@ class Database:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка проверки таблиц: {e}")
-            # Не выходим из программы, просто логируем ошибку
     
     # ========== МЕТОДЫ ДЛЯ СЕРВЕРОВ ==========
     
@@ -416,21 +459,41 @@ class Database:
         
         # Создаем новую
         try:
-            self.execute('''
-                INSERT INTO tracked_roles 
-                (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
-                VALUES (%s, %s, %s, %s, %s)
-            ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
+            # Для PostgreSQL используем ON CONFLICT
+            if not self.use_sqlite:
+                self.execute('''
+                    INSERT INTO tracked_roles 
+                    (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (server_id, source_server_id, source_role_id) 
+                    DO UPDATE SET is_active = TRUE
+                    RETURNING id
+                ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
+                
+                # Получаем ID из результата
+                result = self.execute(
+                    '''SELECT id FROM tracked_roles 
+                       WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
+                    (server_id, source_server_id, source_role_id),
+                    fetchone=True
+                )
+            else:
+                # Для SQLite
+                self.execute('''
+                    INSERT OR IGNORE INTO tracked_roles 
+                    (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
+                    VALUES (%s, %s, %s, %s, %s)
+                ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
+                
+                result = self.execute(
+                    '''SELECT id FROM tracked_roles 
+                       WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
+                    (server_id, source_server_id, source_role_id),
+                    fetchone=True
+                )
         except Exception as e:
             logger.error(f"❌ Ошибка добавления роли: {e}")
             return None
-        
-        result = self.execute(
-            '''SELECT id FROM tracked_roles 
-               WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
-            (server_id, source_server_id, source_role_id),
-            fetchone=True
-        )
         
         return result['id'] if result else None
     
