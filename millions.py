@@ -10,7 +10,14 @@ import logging
 import sys
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Загрузка переменных окружения
@@ -19,10 +26,14 @@ load_dotenv()
 # Конфигурация
 TOKEN = os.getenv('DISCORD_TOKEN')
 if not TOKEN:
-    print("❌ ОШИБКА: DISCORD_TOKEN не найден!")
-    print("💡 Установите переменную в настройках Railway:")
-    print("   DISCORD_TOKEN=ваш_токен_бота")
+    logger.error("❌ ОШИБКА: DISCORD_TOKEN не найден!")
+    logger.error("💡 Установите переменную в настройках Railway:")
+    logger.error("   1. Перейдите в Settings вашего приложения")
+    logger.error("   2. Добавьте Variables: DISCORD_TOKEN=ваш_токен_бота")
+    logger.error("   3. Нажмите Add")
     sys.exit(1)
+
+logger.info("✅ DISCORD_TOKEN найден")
 
 # Настройка интентов
 intents = discord.Intents.default()
@@ -33,129 +44,87 @@ intents.guilds = True
 # Создание бота
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# ========== БАЗА ДАННЫХ (PostgreSQL для Railway) ==========
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    POSTGRES_AVAILABLE = True
-except ImportError:
-    logger.error("❌ psycopg2 не установлен!")
-    POSTGRES_AVAILABLE = False
-
+# ========== БАЗА ДАННЫХ ==========
 class Database:
     def __init__(self):
         self.conn = None
+        self.use_sqlite = False
         self.connect()
         if self.conn:
             self.init_database()
     
-    def connect(self):
-        """Подключение к PostgreSQL Railway"""
-        if not POSTGRES_AVAILABLE:
-            logger.error("❌ psycopg2 не установлен. Запустите: pip install psycopg2-binary")
-            sys.exit(1)
+    def get_database_url(self):
+        """Получить строку подключения к PostgreSQL из Railway"""
+        database_url = os.getenv('DATABASE_URL')
         
+        if database_url:
+            logger.info("🔗 Использую DATABASE_URL от Railway")
+            if database_url.startswith('postgresql://'):
+                database_url = database_url.replace('postgresql://', 'postgres://')
+            return database_url
+        
+        db_host = os.getenv('PGHOST')
+        db_name = os.getenv('PGDATABASE')
+        db_user = os.getenv('PGUSER')
+        db_password = os.getenv('PGPASSWORD')
+        db_port = os.getenv('PGPORT', 5432)
+        
+        if all([db_host, db_name, db_user, db_password]):
+            logger.info("🔗 Использую отдельные переменные PostgreSQL")
+            return f"postgres://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        
+        logger.warning("⚠️ Переменные PostgreSQL не найдены, использую SQLite")
+        return None
+    
+    def connect(self):
+        """Подключение к базе данных"""
         try:
-            # Получаем DATABASE_URL из переменных окружения Railway
-            DATABASE_URL = os.getenv('DATABASE_URL')
+            database_url = self.get_database_url()
             
-            if DATABASE_URL:
-                # Railway предоставляет DATABASE_URL в формате:
-                # postgresql://username:password@host:port/database
-                # Нужно преобразовать для psycopg2
-                if DATABASE_URL.startswith('postgresql://'):
-                    # Заменяем на формат psycopg2
-                    DATABASE_URL = DATABASE_URL.replace('postgresql://', 'postgres://')
-                
-                logger.info(f"🔗 Подключаюсь к PostgreSQL через DATABASE_URL")
-                self.conn = psycopg2.connect(
-                    DATABASE_URL,
-                    sslmode='require',
-                    cursor_factory=RealDictCursor
-                )
-            else:
-                # Альтернативные переменные окружения
-                db_config = {
-                    'host': os.getenv('PGHOST'),
-                    'database': os.getenv('PGDATABASE'),
-                    'user': os.getenv('PGUSER'),
-                    'password': os.getenv('PGPASSWORD'),
-                    'port': os.getenv('PGPORT', 5432)
-                }
-                
-                # Проверяем, все ли переменные есть
-                if all(db_config.values()):
-                    logger.info(f"🔗 Подключаюсь к PostgreSQL: {db_config['host']}:{db_config['port']}")
+            if database_url:
+                try:
+                    import psycopg2
+                    from psycopg2.extras import RealDictCursor
+                    
+                    logger.info("🔄 Подключение к PostgreSQL...")
                     self.conn = psycopg2.connect(
-                        host=db_config['host'],
-                        database=db_config['database'],
-                        user=db_config['user'],
-                        password=db_config['password'],
-                        port=db_config['port'],
+                        database_url,
+                        sslmode='require',
                         cursor_factory=RealDictCursor
                     )
-                else:
-                    logger.error("❌ Не найдены переменные PostgreSQL!")
-                    logger.error("💡 На Railway добавьте PostgreSQL через Add Plugin")
-                    logger.error("💡 Railway автоматически создаст DATABASE_URL")
-                    sys.exit(1)
+                    logger.info("✅ Подключено к PostgreSQL (Railway)")
+                    return
+                except ImportError:
+                    logger.error("❌ psycopg2 не установлен")
+                    logger.info("💡 Запустите: pip install psycopg2-binary")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка PostgreSQL: {e}")
             
-            logger.info("✅ Успешное подключение к PostgreSQL")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
-            
-            # Подсказки для решения проблемы
-            logger.info("💡 Решение проблем:")
-            logger.info("1. На Railway добавьте PostgreSQL через 'Add Plugin'")
-            logger.info("2. Railway автоматически создаст DATABASE_URL")
-            logger.info("3. Или укажите переменные вручную:")
-            logger.info("   PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGPORT")
-            logger.info("4. Проверьте что psycopg2-binary установлен")
-            
-            # Запрашиваем конфигурацию у пользователя
-            self.setup_database_manually()
-            return False
-    
-    def setup_database_manually(self):
-        """Ручная настройка базы данных"""
-        logger.info("🔄 Пытаюсь использовать SQLite как временное решение...")
-        
-        try:
+            logger.info("🔄 Использую SQLite как временное решение...")
             import sqlite3
             self.use_sqlite = True
-            self.db_name = 'bot_database.db'
-            
-            # Создаем SQLite соединение
-            self.conn = sqlite3.connect(self.db_name)
+            self.conn = sqlite3.connect('bot_database.db')
             self.conn.row_factory = sqlite3.Row
+            logger.info("✅ Создана SQLite база: bot_database.db")
+            logger.warning("⚠️ SQLite для разработки. Для продакшена добавьте PostgreSQL в Railway:")
             
-            logger.info(f"✅ Использую SQLite базу: {self.db_name}")
-            logger.info("⚠️ ВНИМАНИЕ: SQLite не поддерживает многопользовательский доступ")
-            logger.info("💡 Для продакшена используйте PostgreSQL на Railway")
-            
-            return True
         except Exception as e:
-            logger.error(f"❌ Не удалось создать SQLite базу: {e}")
+            logger.error(f"❌ Критическая ошибка подключения к БД: {e}")
             sys.exit(1)
     
-    def execute(self, query, params=None, fetchone=False, fetchall=False):
+    def execute(self, query, params=None, fetchone=False, fetchall=False, commit=True):
         """Выполнение SQL запроса"""
         try:
             cursor = self.conn.cursor()
             
-            # Адаптируем запрос для SQLite если нужно
-            if hasattr(self, 'use_sqlite') and self.use_sqlite:
+            if self.use_sqlite:
                 query = query.replace('%s', '?')
-                query = query.replace('SERIAL', 'INTEGER')
+                query = query.replace('SERIAL', 'INTEGER PRIMARY KEY AUTOINCREMENT')
                 query = query.replace('VARCHAR', 'TEXT')
                 query = query.replace('BOOLEAN', 'INTEGER')
-                query = query.replace('TRUE', '1')
-                query = query.replace('FALSE', '0')
-                query = query.replace('TIMESTAMP DEFAULT CURRENT_TIMESTAMP', 'TIMESTAMP')
-                query = query.replace('ON CONFLICT DO UPDATE', 'ON CONFLICT REPLACE')
-                query = query.replace('EXCLUDED.', 'excluded.')
+                query = query.replace('TIMESTAMP DEFAULT CURRENT_TIMESTAMP', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+                if 'ON CONFLICT' in query:
+                    query = query.split('ON CONFLICT')[0]
             
             cursor.execute(query, params or ())
             
@@ -166,113 +135,115 @@ class Database:
             else:
                 result = cursor.rowcount
             
-            if not hasattr(self, 'use_sqlite') or not self.use_sqlite:
-                self.conn.commit()
-            else:
+            if commit:
                 self.conn.commit()
             
             cursor.close()
             return result
         except Exception as e:
-            if not hasattr(self, 'use_sqlite') or not self.use_sqlite:
-                self.conn.rollback()
             logger.error(f"❌ Ошибка SQL: {e}")
-            logger.error(f"Запрос: {query[:100]}...")
             raise
     
     def init_database(self):
         """Инициализация таблиц БД"""
         logger.info("🔄 Создание таблиц в базе данных...")
         
-        try:
-            # Таблица серверов
+        self.execute('''
+            CREATE TABLE IF NOT EXISTS servers (
+                id SERIAL PRIMARY KEY,
+                discord_id VARCHAR(255) UNIQUE NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                is_setup BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        self.execute('''
+            CREATE TABLE IF NOT EXISTS server_settings (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                admin_role_1_id VARCHAR(255),
+                admin_role_2_id VARCHAR(255),
+                news_channel_id VARCHAR(255),
+                flood_channel_id VARCHAR(255),
+                tags_channel_id VARCHAR(255),
+                media_channel_id VARCHAR(255),
+                logs_channel_id VARCHAR(255),
+                high_flood_channel_id VARCHAR(255),
+                voice_channel_ids TEXT,
+                high_voice_channel_id VARCHAR(255),
+                main_category_id VARCHAR(255),
+                high_category_id VARCHAR(255),
+                UNIQUE(server_id)
+            )
+        ''')
+        
+        self.execute('''
+            CREATE TABLE IF NOT EXISTS tracked_roles (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                source_server_id VARCHAR(255) NOT NULL,
+                source_server_name VARCHAR(255),
+                source_role_id VARCHAR(255) NOT NULL,
+                source_role_name VARCHAR(255),
+                target_role_id VARCHAR(255),
+                target_role_name VARCHAR(255),
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        if self.use_sqlite:
             self.execute('''
-                CREATE TABLE IF NOT EXISTS servers (
-                    id SERIAL PRIMARY KEY,
-                    discord_id VARCHAR(255) UNIQUE NOT NULL,
-                    name VARCHAR(255) NOT NULL,
-                    is_setup BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_roles_unique 
+                ON tracked_roles (server_id, source_server_id, source_role_id)
             ''')
-            
-            # Таблица настроек сервера
+        else:
             self.execute('''
-                CREATE TABLE IF NOT EXISTS server_settings (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    admin_role_1_id VARCHAR(255),
-                    admin_role_2_id VARCHAR(255),
-                    news_channel_id VARCHAR(255),
-                    flood_channel_id VARCHAR(255),
-                    tags_channel_id VARCHAR(255),
-                    media_channel_id VARCHAR(255),
-                    logs_channel_id VARCHAR(255),
-                    high_flood_channel_id VARCHAR(255),
-                    voice_channel_ids TEXT,
-                    UNIQUE(server_id)
-                )
+                ALTER TABLE tracked_roles 
+                ADD CONSTRAINT unique_tracked_role 
+                UNIQUE (server_id, source_server_id, source_role_id)
             ''')
-            
-            # Таблица отслеживаемых ролей
+        
+        self.execute('''
+            CREATE TABLE IF NOT EXISTS user_roles (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                user_id VARCHAR(255) NOT NULL,
+                username VARCHAR(255),
+                tracked_role_id INTEGER NOT NULL,
+                has_role BOOLEAN DEFAULT FALSE,
+                last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        if self.use_sqlite:
             self.execute('''
-                CREATE TABLE IF NOT EXISTS tracked_roles (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    source_server_id VARCHAR(255) NOT NULL,
-                    source_server_name VARCHAR(255),
-                    source_role_id VARCHAR(255) NOT NULL,
-                    source_role_name VARCHAR(255),
-                    target_role_id VARCHAR(255),
-                    target_role_name VARCHAR(255),
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(server_id, source_server_id, source_role_id)
-                )
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_user_roles_unique 
+                ON user_roles (server_id, user_id, tracked_role_id)
             ''')
-            
-            # Таблица пользователей с ролями
+        
+        self.execute('''
+            CREATE TABLE IF NOT EXISTS banned_users (
+                id SERIAL PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                user_id VARCHAR(255) NOT NULL,
+                username VARCHAR(255) NOT NULL,
+                ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                unban_time TIMESTAMP,
+                ban_duration INTEGER DEFAULT 600,
+                reason TEXT,
+                is_unbanned BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        
+        if self.use_sqlite:
             self.execute('''
-                CREATE TABLE IF NOT EXISTS user_roles (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    user_id VARCHAR(255) NOT NULL,
-                    username VARCHAR(255),
-                    tracked_role_id INTEGER NOT NULL,
-                    has_role BOOLEAN DEFAULT FALSE,
-                    last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(server_id, user_id, tracked_role_id)
-                )
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_banned_users_unique 
+                ON banned_users (server_id, user_id)
             ''')
-            
-            # Таблица забаненных пользователей
-            self.execute('''
-                CREATE TABLE IF NOT EXISTS banned_users (
-                    id SERIAL PRIMARY KEY,
-                    server_id INTEGER NOT NULL,
-                    user_id VARCHAR(255) NOT NULL,
-                    username VARCHAR(255) NOT NULL,
-                    ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    unban_time TIMESTAMP,
-                    ban_duration INTEGER DEFAULT 600,
-                    reason TEXT,
-                    is_unbanned BOOLEAN DEFAULT FALSE,
-                    UNIQUE(server_id, user_id)
-                )
-            ''')
-            
-            logger.info("✅ Таблицы базы данных успешно созданы/проверены")
-            
-            # Проверяем соединение
-            test_result = self.execute('SELECT 1 as test', fetchone=True)
-            if test_result:
-                logger.info(f"✅ Тест подключения к БД пройден")
-            else:
-                logger.error("❌ Тест подключения к БД не пройден")
-                
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка инициализации БД: {e}")
-            raise
+        
+        logger.info("✅ Таблицы базы данных успешно созданы/проверены")
     
     # ========== МЕТОДЫ ДЛЯ СЕРВЕРОВ ==========
     
@@ -290,20 +261,15 @@ class Database:
         try:
             self.execute(
                 '''INSERT INTO servers (discord_id, name) 
-                   VALUES (%s, %s)
-                   ON CONFLICT (discord_id) DO NOTHING''',
+                   VALUES (%s, %s)''',
                 (discord_id, name)
             )
-        except Exception as e:
-            # Для SQLite другой синтаксис
-            if 'DO NOTHING' in str(e):
-                self.execute(
-                    '''INSERT OR IGNORE INTO servers (discord_id, name) 
-                       VALUES (%s, %s)''',
-                    (discord_id, name)
-                )
-            else:
-                raise
+        except:
+            self.execute(
+                '''INSERT OR IGNORE INTO servers (discord_id, name) 
+                   VALUES (%s, %s)''',
+                (discord_id, name)
+            )
         
         result = self.execute(
             'SELECT * FROM servers WHERE discord_id = %s',
@@ -325,59 +291,28 @@ class Database:
         """Сохранить настройки сервера"""
         voice_channel_ids = json.dumps(settings.get('voice_channel_ids', []))
         
-        try:
-            self.execute('''
-                INSERT INTO server_settings 
-                (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
-                 flood_channel_id, tags_channel_id, media_channel_id, 
-                 logs_channel_id, high_flood_channel_id, voice_channel_ids)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (server_id) 
-                DO UPDATE SET 
-                    admin_role_1_id = EXCLUDED.admin_role_1_id,
-                    admin_role_2_id = EXCLUDED.admin_role_2_id,
-                    news_channel_id = EXCLUDED.news_channel_id,
-                    flood_channel_id = EXCLUDED.flood_channel_id,
-                    tags_channel_id = EXCLUDED.tags_channel_id,
-                    media_channel_id = EXCLUDED.media_channel_id,
-                    logs_channel_id = EXCLUDED.logs_channel_id,
-                    high_flood_channel_id = EXCLUDED.high_flood_channel_id,
-                    voice_channel_ids = EXCLUDED.voice_channel_ids
-            ''', (
-                server_id,
-                settings.get('admin_role_1_id'),
-                settings.get('admin_role_2_id'),
-                settings.get('news_channel_id'),
-                settings.get('flood_channel_id'),
-                settings.get('tags_channel_id'),
-                settings.get('media_channel_id'),
-                settings.get('logs_channel_id'),
-                settings.get('high_flood_channel_id'),
-                voice_channel_ids
-            ))
-        except Exception as e:
-            # Для SQLite
-            if 'EXCLUDED' in str(e):
-                self.execute('''
-                    INSERT OR REPLACE INTO server_settings 
-                    (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
-                     flood_channel_id, tags_channel_id, media_channel_id, 
-                     logs_channel_id, high_flood_channel_id, voice_channel_ids)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ''', (
-                    server_id,
-                    settings.get('admin_role_1_id'),
-                    settings.get('admin_role_2_id'),
-                    settings.get('news_channel_id'),
-                    settings.get('flood_channel_id'),
-                    settings.get('tags_channel_id'),
-                    settings.get('media_channel_id'),
-                    settings.get('logs_channel_id'),
-                    settings.get('high_flood_channel_id'),
-                    voice_channel_ids
-                ))
-            else:
-                raise
+        self.execute('''
+            INSERT INTO server_settings 
+            (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
+             flood_channel_id, tags_channel_id, media_channel_id, 
+             logs_channel_id, high_flood_channel_id, voice_channel_ids,
+             high_voice_channel_id, main_category_id, high_category_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ''', (
+            server_id,
+            settings.get('admin_role_1_id'),
+            settings.get('admin_role_2_id'),
+            settings.get('news_channel_id'),
+            settings.get('flood_channel_id'),
+            settings.get('tags_channel_id'),
+            settings.get('media_channel_id'),
+            settings.get('logs_channel_id'),
+            settings.get('high_flood_channel_id'),
+            voice_channel_ids,
+            settings.get('high_voice_channel_id'),
+            settings.get('main_category_id'),
+            settings.get('high_category_id')
+        ))
     
     def get_server_settings(self, server_id: int) -> dict:
         """Получить настройки сервера"""
@@ -393,7 +328,6 @@ class Database:
     def add_tracked_role(self, server_id: int, source_server_id: str, source_role_id: str,
                         source_server_name: str = None, source_role_name: str = None) -> int:
         """Добавить отслеживаемую роль"""
-        # Сначала пробуем найти существующую
         result = self.execute(
             '''SELECT id FROM tracked_roles 
                WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
@@ -402,14 +336,12 @@ class Database:
         )
         
         if result:
-            # Активируем существующую
             self.execute(
                 'UPDATE tracked_roles SET is_active = TRUE WHERE id = %s',
                 (result['id'],)
             )
             return result['id']
         
-        # Создаем новую
         self.execute('''
             INSERT INTO tracked_roles 
             (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
@@ -455,29 +387,11 @@ class Database:
         """Забанить пользователя"""
         unban_time = datetime.now() + timedelta(seconds=600)
         
-        try:
-            self.execute('''
-                INSERT INTO banned_users 
-                (server_id, user_id, username, unban_time, reason)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (server_id, user_id) 
-                DO UPDATE SET 
-                    username = EXCLUDED.username,
-                    unban_time = EXCLUDED.unban_time,
-                    reason = EXCLUDED.reason,
-                    ban_time = CURRENT_TIMESTAMP,
-                    is_unbanned = FALSE
-            ''', (server_id, user_id, username, unban_time.isoformat(), reason))
-        except Exception as e:
-            # Для SQLite
-            if 'EXCLUDED' in str(e):
-                self.execute('''
-                    INSERT OR REPLACE INTO banned_users 
-                    (server_id, user_id, username, unban_time, reason)
-                    VALUES (%s, %s, %s, %s, %s)
-                ''', (server_id, user_id, username, unban_time.isoformat(), reason))
-            else:
-                raise
+        self.execute('''
+            INSERT OR REPLACE INTO banned_users 
+            (server_id, user_id, username, unban_time, reason)
+            VALUES (%s, %s, %s, %s, %s)
+        ''', (server_id, user_id, username, unban_time.isoformat(), reason))
         
         result = self.execute(
             'SELECT id FROM banned_users WHERE server_id = %s AND user_id = %s',
@@ -522,213 +436,106 @@ except Exception as e:
     logger.error(f"❌ Не удалось инициализировать базу данных: {e}")
     sys.exit(1)
 
-# ========== КОМАНДА УДАЛЕНИЯ РОЛЕЙ ==========
-class DeleteRoleView(discord.ui.View):
-    """Представление для удаления отслеживаемых ролей"""
-    def __init__(self, guild: discord.Guild, tracked_roles: list):
-        super().__init__(timeout=60)
-        self.guild = guild
-        self.tracked_roles = tracked_roles
-        
-        # Добавляем выпадающий список с ролями
-        self.add_item(RoleSelect(tracked_roles))
-
-class RoleSelect(discord.ui.Select):
-    """Выпадающий список для выбора роли"""
-    def __init__(self, tracked_roles: list):
-        options = []
-        
-        for role in tracked_roles:
-            option = discord.SelectOption(
-                label=role['target_role_name'] or role['source_server_name'],
-                value=str(role['id']),
-                description=f"Сервер: {role['source_server_name']} | Роль: {role['source_role_name']}"
-            )
-            options.append(option)
-        
-        super().__init__(
-            placeholder="Выберите роль для удаления...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
+# ========== ПАНЕЛЬ УПРАВЛЕНИЯ ==========
+class ControlPanelView(discord.ui.View):
+    """Панель управления ботом"""
+    def __init__(self):
+        super().__init__(timeout=None)
     
-    async def callback(self, interaction: discord.Interaction):
-        selected_id = int(self.values[0])
+    @discord.ui.button(label="⚙️ Настройка сервера", style=discord.ButtonStyle.primary, custom_id="setup_btn", row=0)
+    async def setup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка настройки сервера"""
+        await interaction.response.defer(ephemeral=True)
+        await setup_server_command(interaction)
+    
+    @discord.ui.button(label="➕ Добавить роль", style=discord.ButtonStyle.success, custom_id="add_role_btn", row=0)
+    async def add_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка добавления роли"""
+        modal = AddRoleModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="🗑️ Удалить роль", style=discord.ButtonStyle.danger, custom_id="remove_role_btn", row=0)
+    async def remove_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка удаления роли"""
+        await interaction.response.defer(ephemeral=True)
+        await remove_tracked_role_command(interaction)
+    
+    @discord.ui.button(label="📋 Список ролей", style=discord.ButtonStyle.secondary, custom_id="list_roles_btn", row=0)
+    async def list_roles_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка списка ролей"""
+        await interaction.response.defer(ephemeral=True)
+        await list_tracked_roles_command(interaction)
+    
+    @discord.ui.button(label="🔄 Синхронизация", style=discord.ButtonStyle.primary, custom_id="sync_btn", row=1)
+    async def sync_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка синхронизации"""
+        await interaction.response.defer(ephemeral=True)
+        await sync_all_command(interaction)
+    
+    @discord.ui.button(label="📊 Статистика", style=discord.ButtonStyle.secondary, custom_id="stats_btn", row=1)
+    async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка статистики"""
+        await interaction.response.defer(ephemeral=True)
+        await server_stats_command(interaction)
+    
+    @discord.ui.button(label="🔓 Разбан", style=discord.ButtonStyle.success, custom_id="unban_btn", row=1)
+    async def unban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка разбана"""
+        modal = UnbanModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="🏓 Пинг", style=discord.ButtonStyle.secondary, custom_id="ping_btn", row=1)
+    async def ping_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка проверки пинга"""
+        latency = round(bot.latency * 1000)
         
-        # Находим выбранную роль
-        selected_role = None
-        for role in self.view.tracked_roles:
-            if role['id'] == selected_id:
-                selected_role = role
-                break
-        
-        if not selected_role:
-            await interaction.response.send_message(
-                "❌ Роль не найдена!",
-                ephemeral=True
-            )
-            return
-        
-        # Получаем объект роли на сервере
-        target_role = self.view.guild.get_role(int(selected_role['target_role_id'])) if selected_role['target_role_id'] else None
-        
-        # Создаем embed для подтверждения
         embed = discord.Embed(
-            title="⚠️ Подтверждение удаления",
-            description=f"Вы уверены, что хотите удалить отслеживание этой роли?",
-            color=discord.Color.orange()
+            title="🏓 Понг!",
+            description=f"Задержка бота: **{latency}ms**",
+            color=discord.Color.green() if latency < 100 else discord.Color.orange() if latency < 300 else discord.Color.red()
         )
         
-        embed.add_field(
-            name="📡 Сервер-источник",
-            value=f"**Имя:** {selected_role['source_server_name']}\n**ID:** `{selected_role['source_server_id']}`",
-            inline=False
-        )
+        if latency < 100:
+            embed.add_field(name="Статус", value="✅ Отличное соединение", inline=False)
+        elif latency < 300:
+            embed.add_field(name="Статус", value="⚠️ Средняя задержка", inline=False)
+        else:
+            embed.add_field(name="Статус", value="❌ Высокая задержка", inline=False)
         
-        embed.add_field(
-            name="🎯 Отслеживаемая роль",
-            value=f"**Имя:** {selected_role['source_role_name']}\n**ID:** `{selected_role['source_role_id']}`",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🗑️ Роль на этом сервере",
-            value=f"{target_role.mention if target_role else '❌ Роль не найдена'}\n**Имя:** {selected_role['target_role_name']}\n**ID:** `{selected_role['target_role_id']}`",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="⚠️ Последствия удаления:",
-            value="• Роль будет удалена из отслеживания\n"
-                  "• Доступ к каналам будет убран\n"
-                  "• Роль останется на сервере (можно удалить вручную)\n"
-                  "• Все пользователи потеряют доступ\n"
-                  "• Пользователи без других ролей будут забанены",
-            inline=False
-        )
-        
-        view = ConfirmDeleteView(selected_id, target_role, selected_role)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-class ConfirmDeleteView(discord.ui.View):
-    """Кнопки подтверждения удаления"""
-    def __init__(self, role_id: int, target_role: discord.Role, role_data: dict):
-        super().__init__(timeout=60)
-        self.role_id = role_id
-        self.target_role = target_role
-        self.role_data = role_data
+class AddRoleModal(discord.ui.Modal, title="Добавить отслеживаемую роль"):
+    """Модальное окно для добавления роли"""
+    server_id = discord.ui.TextInput(
+        label="ID сервера-источника",
+        placeholder="Введите ID сервера, с которого отслеживать роль...",
+        required=True,
+        max_length=20
+    )
     
-    @discord.ui.button(label="✅ Да, удалить", style=discord.ButtonStyle.danger)
-    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            # Удаляем из базы данных
-            db.deactivate_tracked_role(self.role_id)
-            
-            # Убираем доступ к каналам если роль существует
-            if self.target_role:
-                # Получаем настройки сервера
-                server_data = db.get_or_create_server(str(interaction.guild.id), interaction.guild.name)
-                settings = db.get_server_settings(server_data['id'])
-                
-                if settings:
-                    # Убираем доступ ко всем каналам
-                    channel_ids = []
-                    
-                    # Добавляем текстовые каналы
-                    for key in ['news_channel_id', 'flood_channel_id', 'tags_channel_id', 'media_channel_id']:
-                        if settings.get(key):
-                            channel_ids.append(settings[key])
-                    
-                    # Добавляем голосовые каналы
-                    if settings.get('voice_channel_ids'):
-                        try:
-                            voice_ids = json.loads(settings['voice_channel_ids'])
-                            channel_ids.extend(voice_ids)
-                        except:
-                            pass
-                    
-                    for channel_id in channel_ids:
-                        if channel_id:
-                            try:
-                                channel = interaction.guild.get_channel(int(channel_id))
-                                if channel:
-                                    # Убираем все права
-                                    await channel.set_permissions(self.target_role, overwrite=None)
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка удаления прав: {e}")
-            
-            # Удаляем роль у всех пользователей
-            if self.target_role:
-                members_with_role = [member for member in interaction.guild.members if self.target_role in member.roles]
-                for member in members_with_role:
-                    try:
-                        await member.remove_roles(self.target_role, reason="Удаление отслеживаемой роли")
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка удаления роли у {member}: {e}")
-            
-            # Логируем удаление
-            await Logger.log_to_channel(
-                interaction.guild,
-                f"**🗑️ Отслеживаемая роль удалена**\n"
-                f"• Администратор: {interaction.user.mention}\n"
-                f"• Сервер-источник: {self.role_data['source_server_name']}\n"
-                f"• Отслеживаемая роль: {self.role_data['source_role_name']}\n"
-                f"• Роль на сервере: {self.target_role.mention if self.target_role else 'Удалена'}\n"
-                f"• Пользователей с ролью: {len(members_with_role) if self.target_role else 0}\n"
-                f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-                discord.Color.red()
-            )
-            
-            # Отправляем подтверждение
-            embed = discord.Embed(
-                title="✅ Роль удалена из отслеживания",
-                description=f"Отслеживание роли успешно удалено.",
-                color=discord.Color.green()
-            )
-            
-            embed.add_field(
-                name="📡 Удаленная роль",
-                value=f"**Сервер:** {self.role_data['source_server_name']}\n**Роль:** {self.role_data['source_role_name']}",
-                inline=False
-            )
-            
-            if self.target_role:
-                embed.add_field(
-                    name="⚠️ Что сделано:",
-                    value=f"• Роль {self.target_role.mention} удалена из отслеживания\n"
-                          f"• Доступ к каналам убран\n"
-                          f"• Роль снята с {len(members_with_role)} пользователей\n"
-                          f"• Роль осталась на сервере (удалите вручную если нужно)",
-                    inline=False
-                )
-            
-            # Обновляем интерфейс
-            for item in self.children:
-                item.disabled = True
-            
-            await interaction.response.edit_message(embed=embed, view=self)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка удаления роли: {e}")
-            await interaction.response.send_message(
-                f"❌ Ошибка при удалении роли: {str(e)}",
-                ephemeral=True
-            )
+    role_id = discord.ui.TextInput(
+        label="ID роли на сервере-источнике",
+        placeholder="Введите ID роли для отслеживания...",
+        required=True,
+        max_length=20
+    )
     
-    @discord.ui.button(label="❌ Отмена", style=discord.ButtonStyle.secondary)
-    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="❌ Удаление отменено",
-            description="Роль не была удалена.",
-            color=discord.Color.red()
-        )
-        
-        # Отключаем все кнопки
-        for item in self.children:
-            item.disabled = True
-        
-        await interaction.response.edit_message(embed=embed, view=self)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await add_server_role_command(interaction, self.server_id.value, self.role_id.value)
+
+class UnbanModal(discord.ui.Modal, title="Разблокировать пользователя"):
+    """Модальное окно для разбана"""
+    user_id = discord.ui.TextInput(
+        label="ID пользователя",
+        placeholder="Введите ID пользователя для разбана...",
+        required=True,
+        max_length=20
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await unban_user_command(interaction, self.user_id.value)
 
 # ========== КЛАСС ДЛЯ НАСТРОЙКИ ДОСТУПА К КАНАЛАМ ==========
 class ChannelPermissions:
@@ -736,14 +543,12 @@ class ChannelPermissions:
     async def setup_channel_permissions(guild: discord.Guild, channel: discord.TextChannel, 
                                        admin_role1: discord.Role, admin_role2: discord.Role):
         """Настройка прав доступа для канала (изначально все закрыто)"""
-        # Сбрасываем все права
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             admin_role1: discord.PermissionOverwrite(view_channel=True, send_messages=True),
             admin_role2: discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
         
-        # Применяем права
         for target, overwrite in overwrites.items():
             await channel.set_permissions(target, overwrite=overwrite)
     
@@ -763,10 +568,9 @@ class ChannelPermissions:
                 await news_channel.set_permissions(
                     role,
                     view_channel=True,
-                    send_messages=False,  # Только читать
+                    send_messages=False,
                     read_message_history=True
                 )
-                logger.info(f"✅ Добавлен доступ к news для роли {role.name} (только чтение)")
                 configured_count += 1
         
         # 2. Flood - читать и писать
@@ -776,10 +580,9 @@ class ChannelPermissions:
                 await flood_channel.set_permissions(
                     role,
                     view_channel=True,
-                    send_messages=True,  # Читать и писать
+                    send_messages=True,
                     read_message_history=True
                 )
-                logger.info(f"✅ Добавлен доступ к flood для роли {role.name} (чтение/запись)")
                 configured_count += 1
         
         # 3. Tags - только читать
@@ -789,10 +592,9 @@ class ChannelPermissions:
                 await tags_channel.set_permissions(
                     role,
                     view_channel=True,
-                    send_messages=False,  # Только читать
+                    send_messages=False,
                     read_message_history=True
                 )
-                logger.info(f"✅ Добавлен доступ к tags для роли {role.name} (только чтение)")
                 configured_count += 1
         
         # 4. Media - читать и писать
@@ -802,11 +604,10 @@ class ChannelPermissions:
                 await media_channel.set_permissions(
                     role,
                     view_channel=True,
-                    send_messages=True,  # Читать и писать
+                    send_messages=True,
                     read_message_history=True,
                     attach_files=True
                 )
-                logger.info(f"✅ Добавлен доступ к media для роли {role.name} (чтение/запись)")
                 configured_count += 1
         
         # 5. Голосовые каналы - подключаться и говорить
@@ -819,12 +620,11 @@ class ChannelPermissions:
                         await voice_channel.set_permissions(
                             role,
                             view_channel=True,
-                            connect=True,  # Подключаться
-                            speak=True,    # Говорить
+                            connect=True,
+                            speak=True,
                             stream=True
                         )
                         configured_count += 1
-                logger.info(f"✅ Добавлен доступ к голосовым каналам для роли {role.name}")
             except Exception as e:
                 logger.error(f"❌ Ошибка настройки голосовых каналов: {e}")
         
@@ -836,21 +636,17 @@ class Logger:
     async def log_to_channel(guild: discord.Guild, message: str, color: discord.Color = discord.Color.blue()):
         """Отправить лог в канал logs"""
         try:
-            # Получаем настройки сервера
             server_data = db.get_or_create_server(str(guild.id), guild.name)
             settings = db.get_server_settings(server_data['id'])
             
             logs_channel_id = settings.get('logs_channel_id')
             if not logs_channel_id:
-                logger.warning(f"⚠️ Канал logs не найден для сервера {guild.name}")
                 return
             
             logs_channel = guild.get_channel(int(logs_channel_id))
             if not logs_channel:
-                logger.warning(f"⚠️ Не удалось получить канал logs для сервера {guild.name}")
                 return
             
-            # Создаем embed
             embed = discord.Embed(
                 description=message,
                 color=color,
@@ -868,9 +664,8 @@ class Logger:
         await Logger.log_to_channel(
             interaction.guild,
             f"**Команда выполнена**\n"
-            f"• Команда: `/{command}`\n"
+            f"• Команда: `{command}`\n"
             f"• Пользователь: {interaction.user.mention}\n"
-            f"• ID: `{interaction.user.id}`\n"
             f"• Канал: {interaction.channel.mention}\n"
             f"• Время: {datetime.now().strftime('%H:%M:%S')}",
             discord.Color.green()
@@ -883,7 +678,6 @@ class Logger:
             guild,
             f"**{action}**\n"
             f"• Пользователь: {user.mention}\n"
-            f"• ID: `{user.id}`\n"
             f"• Роль: {role.mention}\n"
             f"• Причина: {reason}\n"
             f"• Время: {datetime.now().strftime('%H:%M:%S')}",
@@ -898,11 +692,9 @@ class Logger:
             guild,
             f"**🔨 Пользователь забанен**\n"
             f"• Пользователь: {user.mention}\n"
-            f"• ID: `{user.id}`\n"
             f"• Причина: {reason}\n"
             f"• Длительность: 10 минут\n"
-            f"• Разбан: {unban_time.strftime('%H:%M:%S')}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+            f"• Разбан: {unban_time.strftime('%H:%M:%S')}",
             discord.Color.red()
         )
     
@@ -913,22 +705,9 @@ class Logger:
             guild,
             f"**🔓 Пользователь разбанен**\n"
             f"• Пользователь: `{username}`\n"
-            f"• ID: `{user_id}`\n"
             f"• Причина: {reason}\n"
             f"• Время: {datetime.now().strftime('%H:%M:%S')}",
             discord.Color.green()
-        )
-    
-    @staticmethod
-    async def log_error(guild: discord.Guild, error: str, context: str = ""):
-        """Логирование ошибки"""
-        await Logger.log_to_channel(
-            guild,
-            f"**❌ Ошибка**\n"
-            f"• Контекст: {context}\n"
-            f"• Ошибка: {error}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.red()
         )
 
 # ========== КЛАСС ДЛЯ РОЛЕЙ И БАНОВ ==========
@@ -943,11 +722,9 @@ class RoleMonitor:
             if not user:
                 return False, []
             
-            # Получаем отслеживаемые роли для этого сервера
             server_data = db.get_or_create_server(str(guild.id), guild.name)
             tracked_roles = db.get_tracked_roles(server_data['id'])
             
-            # Группируем по серверам-источникам
             servers_roles = {}
             for tracked in tracked_roles:
                 server_id = tracked['source_server_id']
@@ -957,9 +734,7 @@ class RoleMonitor:
             
             user_has_any_role = False
             found_roles = []
-            found_servers = set()
             
-            # Проверяем для каждого сервера
             for server_id, roles_list in servers_roles.items():
                 server_has_role = False
                 server_name = roles_list[0]['source_server_name'] if roles_list else "Неизвестно"
@@ -979,11 +754,10 @@ class RoleMonitor:
                                 'source_guild': server_name,
                                 'target_role': tracked['target_role_name']
                             })
-                            break  # Достаточно одной роли с этого сервера
+                            break
                 
                 if server_has_role:
                     user_has_any_role = True
-                    found_servers.add(server_name)
             
             return user_has_any_role, found_roles
             
@@ -992,7 +766,7 @@ class RoleMonitor:
             return False, []
     
     async def sync_user_roles(self, guild: discord.Guild, user_id: int):
-        """Синхронизировать роли пользователя по новой логике (одна роль на сервер-источник)"""
+        """Синхронизировать роли пользователя"""
         try:
             user = guild.get_member(user_id)
             if not user:
@@ -1001,7 +775,6 @@ class RoleMonitor:
             server_data = db.get_or_create_server(str(guild.id), guild.name)
             tracked_roles = db.get_tracked_roles(server_data['id'])
             
-            # Группируем по серверам-источникам
             servers_roles = {}
             for tracked in tracked_roles:
                 server_id = tracked['source_server_id']
@@ -1011,7 +784,6 @@ class RoleMonitor:
             
             actions = []
             
-            # Проверяем для каждого сервера-источника
             for server_id, roles_list in servers_roles.items():
                 if not roles_list or not roles_list[0]['target_role_id']:
                     continue
@@ -1020,7 +792,6 @@ class RoleMonitor:
                 if not target_role:
                     continue
                 
-                # Проверяем, есть ли у пользователя ХОТЯ БЫ ОДНА роль с этого сервера
                 has_any_source_role = False
                 source_guild_name = "Неизвестно"
                 
@@ -1035,24 +806,22 @@ class RoleMonitor:
                         source_role = source_guild.get_role(int(tracked['source_role_id']))
                         if source_role and source_role in source_member.roles:
                             has_any_source_role = True
-                            break  # Достаточно одной роли
+                            break
                 
-                # Синхронизируем
                 if has_any_source_role and target_role not in user.roles:
                     await user.add_roles(target_role, reason=f"Имеет роль с {source_guild_name}")
                     await Logger.log_role_action(
                         guild, user, "✅ Роль добавлена", target_role, f"Имеет роль с {source_guild_name}"
                     )
-                    actions.append(f"➕ Добавлена {target_role.name} (сервер: {source_guild_name})")
+                    actions.append(f"➕ Добавлена {target_role.name}")
                 
                 elif not has_any_source_role and target_role in user.roles:
                     await user.remove_roles(target_role, reason=f"Нет ролей с {source_guild_name}")
                     await Logger.log_role_action(
                         guild, user, "🗑️ Роль удалена", target_role, f"Нет ролей с {source_guild_name}"
                     )
-                    actions.append(f"➖ Удалена {target_role.name} (сервер: {source_guild_name})")
+                    actions.append(f"➖ Удалена {target_role.name}")
             
-            # Проверяем, есть ли у пользователя хотя бы одна роль из любого сервера
             user_has_any_role = False
             for server_id, roles_list in servers_roles.items():
                 for tracked in roles_list:
@@ -1067,21 +836,17 @@ class RoleMonitor:
                 if user_has_any_role:
                     break
             
-            # Если нет ни одной роли - бан на 10 минут
             if not user_has_any_role and user_id not in [int(b['user_id']) for b in db.get_banned_users(server_data['id'])]:
                 await self.ban_user(guild, user_id, user.display_name, "Отсутствие требуемых ролей")
-                actions.append("🔨 Бан на 10 минут (нет ролей ни с одного сервера)")
+                actions.append("🔨 Бан на 10 минут")
             
-            # Логируем проверку если были изменения
             if actions:
                 await Logger.log_to_channel(
                     guild,
                     f"**🔍 Автопроверка пользователя**\n"
                     f"• Пользователь: {user.mention}\n"
-                    f"• ID: `{user.id}`\n"
                     f"• Статус: {'✅ Есть роли' if user_has_any_role else '❌ Нет ролей'}\n"
-                    f"• Действия: {', '.join(actions)}\n"
-                    f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+                    f"• Действия: {', '.join(actions)}",
                     discord.Color.purple()
                 )
             
@@ -1089,16 +854,14 @@ class RoleMonitor:
             
         except Exception as e:
             logger.error(f"❌ Ошибка синхронизации: {e}")
-            await Logger.log_error(guild, str(e), f"Синхронизация пользователя {user_id}")
             return False
     
     async def ban_user(self, guild: discord.Guild, user_id: int, username: str, reason: str):
         """Забанить пользователя на 10 минут"""
         try:
             server_data = db.get_or_create_server(str(guild.id), guild.name)
-            ban_id = db.ban_user(server_data['id'], str(user_id), username, reason)
+            db.ban_user(server_data['id'], str(user_id), username, reason)
             
-            # Баним на сервере
             user = guild.get_member(user_id)
             if user:
                 await user.ban(reason=f"{reason} | Автобан на 10 минут", delete_message_days=0)
@@ -1108,12 +871,10 @@ class RoleMonitor:
                 await guild.ban(user_obj, reason=f"{reason} | Автобан на 10 минут", delete_message_days=0)
                 await Logger.log_ban(guild, user_obj, reason)
             
-            logger.info(f"🔨 Пользователь {username} забанен на 10 минут")
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка бана: {e}")
-            await Logger.log_error(guild, str(e), f"Бан пользователя {username}")
             return False
     
     async def auto_unban_users(self):
@@ -1129,9 +890,8 @@ class RoleMonitor:
                         await server.unban(user, reason="Автоматический разбан после 10 минут")
                         db.unban_user(banned['server_id'], banned['user_id'])
                         await Logger.log_unban(server, banned['user_id'], banned['username'], "Автоматический разбан")
-                        logger.info(f"🔓 Авторазбан {banned['username']}")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка авторазбана: {e}")
+                except:
+                    pass
             
         except Exception as e:
             logger.error(f"❌ Ошибка в авторазбане: {e}")
@@ -1140,10 +900,8 @@ class RoleMonitor:
     async def monitor_roles_task(self):
         """Фоновая задача для мониторинга ролей каждые 3 секунды"""
         try:
-            # Разбан пользователей
             await self.auto_unban_users()
             
-            # Мониторинг ролей на всех серверах
             for guild in self.bot.guilds:
                 try:
                     server_data = db.get_or_create_server(str(guild.id), guild.name)
@@ -1152,14 +910,12 @@ class RoleMonitor:
                     if not tracked_roles:
                         continue
                     
-                    # Получаем только недавно не проверенных пользователей
                     members = [m for m in guild.members if not m.bot]
                     
-                    # Проверяем 3 пользователей за раз (чтобы не перегружать)
                     for member in members[:3]:
                         if not member.bot:
                             await self.sync_user_roles(guild, member.id)
-                            await asyncio.sleep(0.1)  # Маленькая задержка
+                            await asyncio.sleep(0.1)
                             
                 except Exception as e:
                     logger.error(f"❌ Ошибка мониторинга {guild.name}: {e}")
@@ -1170,188 +926,121 @@ class RoleMonitor:
 # Инициализация монитора
 role_monitor = RoleMonitor(bot)
 
-# ========== КОМАНДЫ БОТА ==========
-@bot.event
-async def on_ready():
-    """Событие при запуске бота"""
-    print(f'✅ Бот {bot.user} запущен!')
-    print(f'🆔 ID бота: {bot.user.id}')
-    print(f'📊 Количество серверов: {len(bot.guilds)}')
-    
-    # Синхронизация команд
-    try:
-        synced = await bot.tree.sync()
-        print(f'🔄 Синхронизировано {len(synced)} команд')
-    except Exception as e:
-        print(f'❌ Ошибка синхронизации: {e}')
-    
-    # Запуск мониторинга каждые 3 секунды
-    role_monitor.monitor_roles_task.start()
-    print('👁️ Мониторинг ролей запущен (каждые 3 секунды)')
-
-# ========== КОМАНДА /REMOVE_ROLE ==========
-@bot.tree.command(name="remove_role", description="Удалить отслеживаемую роль с другого сервера")
-@app_commands.checks.has_permissions(administrator=True)
-async def remove_tracked_role(interaction: discord.Interaction):
-    """Удалить отслеживаемую роль"""
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    try:
-        # Логируем команду
-        await Logger.log_command(interaction, "remove_role")
-        
-        guild = interaction.guild
-        server_data = db.get_or_create_server(str(guild.id), guild.name)
-        tracked_roles = db.get_tracked_roles(server_data['id'])
-        
-        if not tracked_roles:
-            await interaction.followup.send(
-                "ℹ️ Нет отслеживаемых ролей для удаления.",
-                ephemeral=True
-            )
-            return
-        
-        # Создаем embed с информацией
-        embed = discord.Embed(
-            title="🗑️ Удаление отслеживаемой роли",
-            description="Выберите роль из списка ниже для удаления:",
-            color=discord.Color.orange()
-        )
-        
-        embed.add_field(
-            name="📋 Доступные роли",
-            value=f"Найдено {len(tracked_roles)} отслеживаемых ролей",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="⚠️ Внимание",
-            value="При удалении роли:\n• Прекратится отслеживание\n• Уберется доступ к каналам\n• Роль останется на сервере\n• Пользователи без других ролей будут забанены",
-            inline=False
-        )
-        
-        # Создаем представление с выпадающим списком
-        view = DeleteRoleView(guild, tracked_roles)
-        
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка команды remove_role: {e}")
-        await Logger.log_error(interaction.guild, str(e), "Команда /remove_role")
-        await interaction.followup.send(
-            f"❌ Ошибка: {str(e)}",
-            ephemeral=True
-        )
-
-# ========== КОМАНДА /SETT ==========
-@bot.tree.command(name="sett", description="Настройка сервера: создание каналов и админских ролей")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_server(interaction: discord.Interaction):
-    """Создает структуру сервера без обычных ролей - ВСЕ КАНАЛЫ ЗАКРЫТЫ"""
-    
-    await interaction.response.defer(ephemeral=True)
+# ========== КОМАНДЫ В ВИДЕ ФУНКЦИЙ ==========
+async def setup_server_command(interaction: discord.Interaction):
+    """Настройка сервера"""
     guild = interaction.guild
     
     try:
-        # Логируем команду
-        await Logger.log_command(interaction, "sett")
+        await Logger.log_command(interaction, "Настройка сервера")
         
-        # Сохраняем сервер в БД
         server_data = db.get_or_create_server(str(guild.id), guild.name)
         logger.info(f"🔧 Настройка сервера: {guild.name}")
         
-        # 1. СОЗДАНИЕ АДМИНСКИХ РОЛЕЙ (только 2 админские, без обычных!)
+        # 1. СОЗДАНИЕ АДМИНСКИХ РОЛЕЙ
         admin_role1 = await guild.create_role(
-            name="Админ-1",
+            name="Own",
             permissions=discord.Permissions(administrator=True),
             color=discord.Color.red(),
-            reason="Настройка сервера через /sett"
+            reason="Настройка сервера"
         )
         
         admin_role2 = await guild.create_role(
-            name="Админ-2",
+            name="High",
             permissions=discord.Permissions(administrator=True),
             color=discord.Color.blue(),
-            reason="Настройка сервера через /sett"
+            reason="Настройка сервера"
         )
         
-        logger.info(f"✅ Созданы админские роли")
+        logger.info(f"✅ Созданы админские роли Own и High")
         
-        # 2. СОЗДАНИЕ ТЕКСТОВЫХ КАНАЛОВ (ВСЕ ИЗНАЧАЛЬНО ЗАКРЫТЫ)
+        # 2. СОЗДАНИЕ КАТЕГОРИЙ
+        # Категория Main
+        main_category = await guild.create_category(
+            name="MAIN",
+            reason="Категория для основных каналов"
+        )
         
-        # Базовые права: все закрыто, только админы видят
+        # Категория High
+        high_category = await guild.create_category(
+            name="HIGH",
+            reason="Категория для высокоуровневых каналов"
+        )
+        
+        # Базовые права для категорий
         base_overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             admin_role1: discord.PermissionOverwrite(view_channel=True, send_messages=True),
             admin_role2: discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
         
-        # 1.1 News - создаем закрытым
-        news_channel = await guild.create_text_channel(
+        await main_category.set_permissions(guild.default_role, view_channel=False)
+        await high_category.set_permissions(guild.default_role, view_channel=False)
+        
+        # 3. СОЗДАНИЕ КАНАЛОВ В КАТЕГОРИИ MAIN
+        # News
+        news_channel = await main_category.create_text_channel(
             name="news",
             topic="📢 Новости сервера (только для чтения)",
-            overwrites=base_overwrites,  # Закрытый
-            reason="Канал News из команды /sett"
+            overwrites=base_overwrites
         )
         
-        # 1.2 Flood - создаем закрытым
-        flood_channel = await guild.create_text_channel(
+        # Flood
+        flood_channel = await main_category.create_text_channel(
             name="flood",
             topic="💬 Общий чат для всех",
-            overwrites=base_overwrites,  # Закрытый
-            reason="Канал Flood из команды /sett"
+            overwrites=base_overwrites
         )
         
-        # 1.3 Tags - создаем закрытым
-        tags_channel = await guild.create_text_channel(
+        # Tags
+        tags_channel = await main_category.create_text_channel(
             name="tags",
-            topic="🏷️ Теги (только для админов)",
-            overwrites=base_overwrites,  # Закрытый
-            reason="Канал Tags из команды /sett"
+            topic="🏷️ Теги",
+            overwrites=base_overwrites
         )
         
-        # 1.4 Media - создаем закрытым
-        media_channel = await guild.create_text_channel(
+        # Media
+        media_channel = await main_category.create_text_channel(
             name="media",
             topic="🖼️ Медиа-контент",
-            overwrites=base_overwrites,  # Закрытый
-            reason="Канал Media из команды /sett"
+            overwrites=base_overwrites
         )
         
-        logger.info(f"✅ Созданы текстовые каналы (все закрыты)")
-        
-        # 3. ЗАКРЫТЫЕ КАНАЛЫ (ТОЛЬКО ДЛЯ АДМИНОВ)
-        
-        # 1.5 Logs - только для админов
-        logs_channel = await guild.create_text_channel(
-            name="logs",
-            topic="📊 Логи сервера (только для админов)",
-            overwrites=base_overwrites,
-            reason="Канал Logs из команды /sett"
-        )
-        
-        # 1.6 High-flood - только для админов
-        high_flood_channel = await guild.create_text_channel(
-            name="high-flood",
-            topic="🚨 Высокоуровневый чат (только для админов)",
-            overwrites=base_overwrites,
-            reason="Канал High-flood из команды /sett"
-        )
-        
-        logger.info(f"✅ Созданы закрытые каналы")
-        
-        # 4. ГОЛОСОВЫЕ КАНАЛЫ (4 штуки, все закрыты)
+        # Голосовые каналы
         voice_channels = []
         for i in range(1, 5):
-            voice_channel = await guild.create_voice_channel(
-                name=f"Голосовой-{i}",
-                overwrites=base_overwrites,  # Закрытый
-                reason=f"Голосовой канал {i} из команды /sett"
+            voice_channel = await main_category.create_voice_channel(
+                name=f"voice {i}",
+                overwrites=base_overwrites
             )
             voice_channels.append(voice_channel)
         
-        logger.info(f"✅ Созданы голосовые каналы (все закрыты)")
+        # 4. СОЗДАНИЕ КАНАЛОВ В КАТЕГОРИИ HIGH
+        # Logs
+        logs_channel = await high_category.create_text_channel(
+            name="logs",
+            topic="📊 Логи сервера",
+            overwrites=base_overwrites
+        )
+        
+        # High-flood
+        high_flood_channel = await high_category.create_text_channel(
+            name="high-flood",
+            topic="🚨 Высокоуровневый чат",
+            overwrites=base_overwrites
+        )
+        
+        # High-voice (закрыт для всех кроме админов)
+        high_voice_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+            admin_role1: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+            admin_role2: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
+        }
+        
+        high_voice_channel = await high_category.create_voice_channel(
+            name="high-voice",
+            overwrites=high_voice_overwrites
+        )
         
         # 5. СОХРАНЕНИЕ В БАЗУ ДАННЫХ
         db.mark_server_setup(str(guild.id))
@@ -1365,77 +1054,59 @@ async def setup_server(interaction: discord.Interaction):
             'media_channel_id': str(media_channel.id),
             'logs_channel_id': str(logs_channel.id),
             'high_flood_channel_id': str(high_flood_channel.id),
-            'voice_channel_ids': [str(vc.id) for vc in voice_channels]
+            'voice_channel_ids': [str(vc.id) for vc in voice_channels],
+            'high_voice_channel_id': str(high_voice_channel.id),
+            'main_category_id': str(main_category.id),
+            'high_category_id': str(high_category.id)
         }
         db.save_server_settings(server_data['id'], settings)
         
         # 6. ОТЧЕТ
         embed = discord.Embed(
             title="🎉 Настройка сервера завершена!",
-            description="Все каналы созданы закрытыми. Добавьте роли через `/serv` чтобы открыть доступ.",
+            description="Все каналы созданы и сгруппированы по категориям.",
             color=discord.Color.green()
         )
         
         embed.add_field(
             name="👑 Админские роли",
-            value=f"{admin_role1.mention}\n{admin_role2.mention}",
+            value=f"{admin_role1.mention} (Own)\n{admin_role2.mention} (High)",
             inline=False
         )
         
         embed.add_field(
-            name="💬 Текстовые каналы (закрыты)",
-            value=f"{news_channel.mention} - news (только чтение при добавлении роли)\n"
-                  f"{flood_channel.mention} - flood (чтение/запись при добавлении роли)\n"
-                  f"{tags_channel.mention} - tags (только чтение при добавлении роли)\n"
-                  f"{media_channel.mention} - media (чтение/запись при добавлении роли)",
-            inline=False
+            name="📁 Категория MAIN",
+            value=f"• {news_channel.mention} - news\n"
+                  f"• {flood_channel.mention} - flood\n"
+                  f"• {tags_channel.mention} - tags\n"
+                  f"• {media_channel.mention} - media\n"
+                  f"• Голосовые: {len(voice_channels)} канала",
+            inline=True
         )
         
         embed.add_field(
-            name="🔒 Закрытые каналы (только админы)",
-            value=f"{logs_channel.mention} - logs\n"
-                  f"{high_flood_channel.mention} - high-flood",
-            inline=False
+            name="📁 Категория HIGH",
+            value=f"• {logs_channel.mention} - logs\n"
+                  f"• {high_flood_channel.mention} - high-flood\n"
+                  f"• {high_voice_channel.mention} - high-voice",
+            inline=True
         )
-        
-        embed.add_field(
-            name="🎤 Голосовые каналы (закрыты)",
-            value="\n".join([vc.mention for vc in voice_channels]),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="📋 Что делать дальше:",
-            value="1. Используйте `/serv ID_сервера ID_роли` чтобы добавить отслеживаемую роль\n"
-                  "2. Используйте `/remove_role` чтобы удалить отслеживаемую роль\n"
-                  "3. Бот создаст роль с именем сервера\n"
-                  "4. Настроит доступ к каналам согласно правам:\n"
-                  "   • News - только чтение\n"
-                  "   • Flood - чтение/запись\n"
-                  "   • Tags - только чтение\n"
-                  "   • Media - чтение/запись + файлы\n"
-                  "   • Голосовые - подключение + голос",
-            inline=False
-        )
-        
-        embed.set_footer(text=f"Настроено пользователем {interaction.user.display_name}")
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # 7. ЛОГИРОВАНИЕ В КАНАЛ LOGS
+        # 7. ЛОГИРОВАНИЕ
         await Logger.log_to_channel(
             guild,
             f"**🎉 Сервер настроен**\n"
             f"• Администратор: {interaction.user.mention}\n"
-            f"• Создано ролей: 2 (админские)\n"
-            f"• Создано текстовых каналов: 6 (все закрыты)\n"
-            f"• Создано голосовых каналов: 4 (все закрыты)\n"
-            f"• Примечание: Все каналы закрыты. Добавляйте роли через /serv\n"
+            f"• Категории: MAIN, HIGH\n"
+            f"• Каналов: {len(voice_channels)+7}\n"
+            f"• Роли: Own, High\n"
             f"• Время: {datetime.now().strftime('%H:%M:%S')}",
             discord.Color.green()
         )
         
-        logger.info(f"✅ Сервер {guild.name} настроен (все каналы закрыты)")
+        logger.info(f"✅ Сервер {guild.name} настроен")
         
     except Exception as e:
         logger.error(f"❌ Ошибка настройки: {e}")
@@ -1444,65 +1115,35 @@ async def setup_server(interaction: discord.Interaction):
             ephemeral=True
         )
 
-# ========== КОМАНДА /SERV ==========
-@bot.tree.command(name="serv", description="Добавить отслеживаемую роль с другого сервера")
-@app_commands.describe(
-    source_server_id="ID сервера-источника",
-    source_role_id="ID роли на сервере-источнике"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def add_server_role(interaction: discord.Interaction, 
-                         source_server_id: str, 
-                         source_role_id: str):
-    """Добавляет отслеживаемую роль и создает соответствующую роль на текущем сервере"""
-    
-    await interaction.response.defer(ephemeral=True)
+async def add_server_role_command(interaction: discord.Interaction, source_server_id: str, source_role_id: str):
+    """Добавить отслеживаемую роль"""
     guild = interaction.guild
     
     try:
-        # Логируем команду
-        await Logger.log_command(interaction, "serv")
+        await Logger.log_command(interaction, "Добавить роль")
         
-        # Проверяем валидность ID
         if not source_server_id.isdigit() or not source_role_id.isdigit():
-            await interaction.followup.send(
-                "❌ ID сервера и роли должны быть числовыми",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ ID должны быть числовыми", ephemeral=True)
             return
         
-        # Получаем информацию о сервере-источнике
         source_guild = bot.get_guild(int(source_server_id))
         if not source_guild:
-            await interaction.followup.send(
-                "❌ Не удалось найти сервер-источник. Проверьте ID и убедитесь, что бот находится на этом сервере.",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ Сервер-источник не найден", ephemeral=True)
             return
         
-        # Получаем информацию о роли
         source_role = source_guild.get_role(int(source_role_id))
         if not source_role:
-            await interaction.followup.send(
-                "❌ Не удалось найти роль на сервере-источнике",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ Роль не найдена", ephemeral=True)
             return
         
-        # Сохраняем сервер в БД
         server_data = db.get_or_create_server(str(guild.id), guild.name)
         
-        # ПРОВЕРКА 1: Не добавлена ли уже эта конкретная роль (сервер + роль)
         tracked_roles = db.get_tracked_roles(server_data['id'])
         for role in tracked_roles:
             if role['source_server_id'] == source_server_id and role['source_role_id'] == source_role_id:
-                await interaction.followup.send(
-                    f"❌ Роль {source_role.name} уже отслеживается с сервера {source_guild.name}!",
-                    ephemeral=True
-                )
+                await interaction.followup.send("❌ Роль уже отслеживается", ephemeral=True)
                 return
         
-        # ПРОВЕРКА 2: Есть ли уже роль для этого сервера-источника?
         existing_target_role = None
         existing_roles_for_server = []
         
@@ -1515,14 +1156,10 @@ async def add_server_role(interaction: discord.Interaction,
                         existing_target_role = target_role
                         break
         
-        # 1. СОЗДАЕМ ИЛИ ПОЛУЧАЕМ РОЛЬ НА ТЕКУЩЕМ СЕРВЕРЕ
         if existing_target_role:
-            # Используем существующую роль
             target_role = existing_target_role
-            logger.info(f"♻️ Использую существующую роль {target_role.name} для сервера {source_guild.name}")
+            logger.info(f"♻️ Использую существующую роль {target_role.name}")
         else:
-            # Создаем новую роль
-            # Имя роли = имя сервера-источника (обрезаем до 32 символов)
             role_name = source_guild.name[:32]
             target_role = await guild.create_role(
                 name=role_name,
@@ -1536,25 +1173,18 @@ async def add_server_role(interaction: discord.Interaction,
                 color=discord.Color.random(),
                 reason=f"Роль для отслеживания с сервера {source_guild.name}"
             )
-            logger.info(f"✅ Создана новая роль {target_role.name} для сервера {source_guild.name}")
+            logger.info(f"✅ Создана новая роль {target_role.name}")
         
-        # 2. НАСТРАИВАЕМ ДОСТУП К КАНАЛАМ (если еще не настроен)
-        # Получаем настройки сервера
         settings = db.get_server_settings(server_data['id'])
         
         if not settings:
-            await interaction.followup.send(
-                "❌ Сервер не настроен! Сначала используйте `/sett`",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ Сервер не настроен", ephemeral=True)
             return
         
-        # Настраиваем доступ к каналам только если это новая роль для сервера
         configured_count = 0
         if not existing_target_role:
             configured_count = await ChannelPermissions.add_role_to_channels(guild, target_role, settings)
         
-        # 3. СОХРАНЯЕМ В БАЗУ ДАННЫХ
         tracked_id = db.add_tracked_role(
             server_data['id'],
             source_server_id,
@@ -1563,10 +1193,8 @@ async def add_server_role(interaction: discord.Interaction,
             source_role.name
         )
         
-        # Обновляем целевую роль (может быть одинаковой для всех ролей с этого сервера)
         db.update_target_role(tracked_id, str(target_role.id), target_role.name)
         
-        # 4. ОТЧЕТ
         embed = discord.Embed(
             title="✅ Роль добавлена для отслеживания",
             color=discord.Color.green()
@@ -1587,50 +1215,18 @@ async def add_server_role(interaction: discord.Interaction,
         if existing_target_role:
             embed.add_field(
                 name="🔄 Используется существующая роль",
-                value=f"{target_role.mention}\n**Имя:** {target_role.name}\n**ID:** `{target_role.id}`\n**Всего ролей с этого сервера:** {len(existing_roles_for_server) + 1}",
+                value=f"{target_role.mention}\n**Всего ролей с этого сервера:** {len(existing_roles_for_server) + 1}",
                 inline=False
             )
         else:
             embed.add_field(
                 name="➕ Создана новая роль",
-                value=f"{target_role.mention}\n**Имя:** {target_role.name}\n**ID:** `{target_role.id}`",
+                value=f"{target_role.mention}",
                 inline=False
             )
         
-        # Получаем каналы для отображения
-        news_channel = guild.get_channel(int(settings['news_channel_id'])) if settings.get('news_channel_id') else None
-        flood_channel = guild.get_channel(int(settings['flood_channel_id'])) if settings.get('flood_channel_id') else None
-        tags_channel = guild.get_channel(int(settings['tags_channel_id'])) if settings.get('tags_channel_id') else None
-        media_channel = guild.get_channel(int(settings['media_channel_id'])) if settings.get('media_channel_id') else None
-        
-        access_info = ""
-        if existing_target_role:
-            access_info = f"• Доступ уже настроен для роли {target_role.mention}\n"
-        else:
-            access_info = "• Доступ настроен впервые для этого сервера\n"
-        
-        embed.add_field(
-            name="🔓 Доступ к каналам:",
-            value=f"{access_info}"
-                  f"• {news_channel.mention if news_channel else 'News'} - **только чтение**\n"
-                  f"• {flood_channel.mention if flood_channel else 'Flood'} - **чтение и запись**\n"
-                  f"• {tags_channel.mention if tags_channel else 'Tags'} - **только чтение**\n"
-                  f"• {media_channel.mention if media_channel else 'Media'} - **чтение, запись, файлы**\n"
-                  f"• Голосовые каналы - **подключение и голос**",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="⚙️ Логика работы:",
-            value=f"• Одна роль на сервер-источник\n• Все отслеживаемые роли с одного сервера дают доступ к одной роли\n• Условие доступа: ИЛИ (хотя бы одна роль из сервера)\n• Всего отслеживаемых ролей с {source_guild.name}: {len(existing_roles_for_server) + 1}",
-            inline=False
-        )
-        
-        embed.set_footer(text="Бот будет проверять наличие ЛЮБОЙ из отслеживаемых ролей с этого сервера")
-        
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # 5. ЛОГИРОВАНИЕ В КАНАЛ LOGS
         if existing_target_role:
             action_type = "🔄 Добавлена дополнительная отслеживаемая роль"
         else:
@@ -1642,138 +1238,119 @@ async def add_server_role(interaction: discord.Interaction,
             f"• Администратор: {interaction.user.mention}\n"
             f"• Сервер-источник: {source_guild.name}\n"
             f"• Отслеживаемая роль: {source_role.name}\n"
-            f"• Используемая роль: {target_role.mention}\n"
-            f"• Всего ролей с сервера: {len(existing_roles_for_server) + 1}\n"
-            f"• Логика: ЕСЛИ (роль1 ИЛИ роль2 ИЛИ ...) ТО доступ\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+            f"• Используемая роль: {target_role.mention}",
             discord.Color.green() if not existing_target_role else discord.Color.blue()
         )
         
-        # 6. СРАЗУ ПРОВЕРЯЕМ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
-        await interaction.followup.send(
-            "🔄 Начинаю проверку всех пользователей...",
-            ephemeral=True
-        )
-        
-        members = [m for m in guild.members if not m.bot]
-        checked = 0
-        updated = 0
-        
-        for member in members:
-            checked += 1
-            if await role_monitor.sync_user_roles(guild, member.id):
-                updated += 1
-            await asyncio.sleep(0.05)  # Уменьшили задержку
-        
-        await Logger.log_to_channel(
-            guild,
-            f"**🔄 Первоначальная проверка пользователей**\n"
-            f"• Проверено пользователей: {checked}\n"
-            f"• Обновлено ролей: {updated}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.blue()
-        )
-        
-        await interaction.followup.send(
-            f"✅ Проверено {checked} пользователей, обновлено {updated}",
-            ephemeral=True
-        )
-        
     except Exception as e:
-        logger.error(f"❌ Ошибка команды /serv: {e}")
-        await Logger.log_error(guild, str(e), "Команда /serv")
-        await interaction.followup.send(
-            f"❌ Ошибка: {str(e)}",
-            ephemeral=True
-        )
+        logger.error(f"❌ Ошибка добавления роли: {e}")
+        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
 
-# ========== КОМАНДА /CHECK_USER ==========
-@bot.tree.command(name="check_user", description="Проверить роли конкретного пользователя")
-@app_commands.describe(user="Пользователь для проверки")
-@app_commands.checks.has_permissions(administrator=True)
-async def check_user(interaction: discord.Interaction, user: discord.Member):
-    """Проверить роли пользователя"""
-    
-    await interaction.response.defer(ephemeral=True)
-    
+async def remove_tracked_role_command(interaction: discord.Interaction):
+    """Удалить отслеживаемую роль"""
     try:
-        # Логируем команду
-        await Logger.log_command(interaction, "check_user")
+        await Logger.log_command(interaction, "Удалить роль")
         
-        has_role, found_roles = await role_monitor.check_user_roles(interaction.guild, user.id)
+        guild = interaction.guild
+        server_data = db.get_or_create_server(str(guild.id), guild.name)
+        tracked_roles = db.get_tracked_roles(server_data['id'])
+        
+        if not tracked_roles:
+            await interaction.followup.send("ℹ️ Нет отслеживаемых ролей", ephemeral=True)
+            return
+        
+        servers_roles = {}
+        for role in tracked_roles:
+            server_id = role['source_server_id']
+            if server_id not in servers_roles:
+                servers_roles[server_id] = []
+            servers_roles[server_id].append(role)
         
         embed = discord.Embed(
-            title=f"🔍 Проверка {user.display_name}",
+            title="🗑️ Удаление отслеживаемой роли",
+            description="Выберите роль из списка ниже:",
             color=discord.Color.orange()
         )
         
-        embed.add_field(
-            name="👤 Пользователь",
-            value=f"{user.mention}\nID: `{user.id}`",
-            inline=False
-        )
-        
-        if has_role:
-            embed.add_field(
-                name="✅ Есть доступ",
-                value="Пользователь имеет хотя бы одну отслеживаемую роль",
-                inline=False
-            )
-            
-            if found_roles:
-                roles_text = "\n".join([f"• {r['role']} ({r['source_guild']})" for r in found_roles])
+        for server_id, roles_list in servers_roles.items():
+            if roles_list:
+                server_name = roles_list[0]['source_server_name'] or "Неизвестно"
+                target_role = guild.get_role(int(roles_list[0]['target_role_id'])) if roles_list[0]['target_role_id'] else None
+                roles_text = "\n".join([f"• {r['source_role_name']} (`{r['source_role_id']}`)" for r in roles_list])
+                
                 embed.add_field(
-                    name="📋 Найденные роли",
-                    value=roles_text,
+                    name=f"📡 {server_name}",
+                    value=f"**Целевая роль:** {target_role.mention if target_role else '❌'}\n"
+                          f"**Роли:**\n{roles_text}",
                     inline=False
                 )
-        else:
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления роли: {e}")
+        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+
+async def list_tracked_roles_command(interaction: discord.Interaction):
+    """Показать все отслеживаемые роли"""
+    try:
+        await Logger.log_command(interaction, "Список ролей")
+        
+        server_data = db.get_or_create_server(str(interaction.guild.id), interaction.guild.name)
+        tracked_roles = db.get_tracked_roles(server_data['id'])
+        
+        if not tracked_roles:
+            await interaction.followup.send("ℹ️ Нет отслеживаемых ролей", ephemeral=True)
+            return
+        
+        servers_roles = {}
+        for role in tracked_roles:
+            server_id = role['source_server_id']
+            if server_id not in servers_roles:
+                servers_roles[server_id] = []
+            servers_roles[server_id].append(role)
+        
+        embed = discord.Embed(
+            title=f"📋 Отслеживаемые роли ({len(tracked_roles)})",
+            description="**Группировка: одна роль на сервер-источник**",
+            color=discord.Color.purple()
+        )
+        
+        for server_id, roles_list in servers_roles.items():
+            target_role = None
+            if roles_list[0]['target_role_id']:
+                target_role = interaction.guild.get_role(int(roles_list[0]['target_role_id']))
+            
+            roles_text = []
+            for role in roles_list:
+                roles_text.append(f"• {role['source_role_name']} (`{role['source_role_id']}`)")
+            
+            value = f"**Сервер:** {roles_list[0]['source_server_name'] or 'Неизвестно'}\n"
+            value += f"**Целевая роль:** {target_role.mention if target_role else '❌'}\n"
+            value += f"**Всего ролей:** {len(roles_list)}\n"
+            value += f"**Отслеживаемые роли:**\n" + "\n".join(roles_text)
+            
             embed.add_field(
-                name="❌ Нет доступа",
-                value="Пользователь не имеет отслеживаемых ролей\nМожет быть забанен автоматически",
+                name=f"📡 {target_role.name if target_role else 'Без имени'}",
+                value=value,
                 inline=False
             )
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # Логируем проверку
-        await Logger.log_to_channel(
-            interaction.guild,
-            f"**🔍 Ручная проверка пользователя**\n"
-            f"• Администратор: {interaction.user.mention}\n"
-            f"• Пользователь: {user.mention}\n"
-            f"• Статус: {'✅ Есть роли' if has_role else '❌ Нет ролей'}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.purple()
-        )
-        
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки: {e}")
-        await Logger.log_error(interaction.guild, str(e), "Команда /check_user")
-        await interaction.followup.send(
-            f"❌ Ошибка: {str(e)}",
-            ephemeral=True
-        )
+        logger.error(f"❌ Ошибка списка ролей: {e}")
+        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
 
-# ========== КОМАНДА /SYNC_ALL ==========
-@bot.tree.command(name="sync_all", description="Синхронизировать всех пользователей")
-@app_commands.checks.has_permissions(administrator=True)
-async def sync_all(interaction: discord.Interaction):
-    """Синхронизировать всех пользователей на сервере"""
-    
-    await interaction.response.defer(ephemeral=True)
-    
+async def sync_all_command(interaction: discord.Interaction):
+    """Синхронизировать всех пользователей"""
     try:
-        # Логируем команду
-        await Logger.log_command(interaction, "sync_all")
+        await Logger.log_command(interaction, "Синхронизация")
         
         guild = interaction.guild
         members = [m for m in guild.members if not m.bot]
         
-        await interaction.followup.send(
-            f"🔄 Начинаю синхронизацию {len(members)} пользователей...",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"🔄 Начинаю синхронизацию {len(members)} пользователей...", ephemeral=True)
         
         processed = 0
         updated = 0
@@ -1784,19 +1361,17 @@ async def sync_all(interaction: discord.Interaction):
             if await role_monitor.sync_user_roles(guild, member.id):
                 updated += 1
             
-            # Проверяем, был ли пользователь забанен в этой сессии
             server_data = db.get_or_create_server(str(guild.id), guild.name)
             banned_users = db.get_banned_users(server_data['id'])
             if member.id in [int(b['user_id']) for b in banned_users]:
                 banned += 1
             
-            # Обновляем статус каждые 10 пользователей
             if processed % 10 == 0:
                 await interaction.edit_original_response(
-                    content=f"🔄 Обработано {processed}/{len(members)} пользователей, обновлено {updated}, забанено {banned}"
+                    content=f"🔄 Обработано {processed}/{len(members)} пользователей"
                 )
             
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
         
         embed = discord.Embed(
             title="✅ Синхронизация завершена",
@@ -1806,68 +1381,33 @@ async def sync_all(interaction: discord.Interaction):
         
         await interaction.edit_original_response(embed=embed)
         
-        # Логируем завершение синхронизации
-        await Logger.log_to_channel(
-            guild,
-            f"**🔄 Массовая синхронизация завершена**\n"
-            f"• Администратор: {interaction.user.mention}\n"
-            f"• Обработано: {processed} пользователей\n"
-            f"• Обновлено: {updated}\n"
-            f"• Забанено: {banned}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.green()
-        )
-        
     except Exception as e:
         logger.error(f"❌ Ошибка синхронизации: {e}")
-        await Logger.log_error(interaction.guild, str(e), "Команда /sync_all")
-        await interaction.followup.send(
-            f"❌ Ошибка: {str(e)}",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
 
-# ========== КОМАНДА /UNBAN ==========
-@bot.tree.command(name="unban", description="Разблокировать пользователя")
-@app_commands.describe(
-    user_id="ID пользователя для разбана"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def unban_user(interaction: discord.Interaction, user_id: str):
+async def unban_user_command(interaction: discord.Interaction, user_id: str):
     """Разбанить пользователя"""
-    
-    await interaction.response.defer(ephemeral=True)
-    
     try:
-        # Логируем команду
-        await Logger.log_command(interaction, "unban")
+        await Logger.log_command(interaction, "Разбан")
         
-        # Проверяем валидность ID
         if not user_id.isdigit():
-            await interaction.followup.send(
-                "❌ ID пользователя должен быть числовым",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ ID должен быть числовым", ephemeral=True)
             return
         
-        # Получаем пользователя
         user = await bot.fetch_user(int(user_id))
-        
-        # Разбаниваем на сервере
         await interaction.guild.unban(user, reason=f"Разбан администратором {interaction.user}")
         
-        # Обновляем в БД
         server_data = db.get_or_create_server(str(interaction.guild.id), interaction.guild.name)
         db.unban_user(server_data['id'], user_id)
         
         embed = discord.Embed(
             title="🔓 Пользователь разблокирован",
-            description=f"**Пользователь:** {user.name}\n**ID:** `{user_id}`\n**Администратор:** {interaction.user.mention}",
+            description=f"**Пользователь:** {user.name}\n**ID:** `{user_id}`",
             color=discord.Color.green()
         )
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # Логируем разбан
         await Logger.log_unban(
             interaction.guild, 
             user_id, 
@@ -1876,90 +1416,15 @@ async def unban_user(interaction: discord.Interaction, user_id: str):
         )
         
     except discord.NotFound:
-        await interaction.followup.send(
-            "❌ Пользователь не найден или не забанен",
-            ephemeral=True
-        )
+        await interaction.followup.send("❌ Пользователь не найден или не забанен", ephemeral=True)
     except Exception as e:
         logger.error(f"❌ Ошибка разбана: {e}")
-        await Logger.log_error(interaction.guild, str(e), "Команда /unban")
-        await interaction.followup.send(
-            f"❌ Ошибка: {str(e)}",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
 
-# ========== КОМАНДА /LIST_ROLES ==========
-@bot.tree.command(name="list_roles", description="Список всех отслеживаемых ролей")
-@app_commands.checks.has_permissions(administrator=True)
-async def list_tracked_roles(interaction: discord.Interaction):
-    """Показать все отслеживаемые роли"""
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    try:
-        # Логируем команду
-        await Logger.log_command(interaction, "list_roles")
-        
-        server_data = db.get_or_create_server(str(interaction.guild.id), interaction.guild.name)
-        tracked_roles = db.get_tracked_roles(server_data['id'])
-        
-        if not tracked_roles:
-            await interaction.followup.send(
-                "ℹ️ Нет отслеживаемых ролей. Используйте `/serv` для добавления.",
-                ephemeral=True
-            )
-            return
-        
-        embed = discord.Embed(
-            title=f"📋 Отслеживаемые роли ({len(tracked_roles)})",
-            color=discord.Color.purple()
-        )
-        
-        for role in tracked_roles:
-            target_role = interaction.guild.get_role(int(role['target_role_id'])) if role['target_role_id'] else None
-            
-            value = f"**Сервер:** {role['source_server_name'] or 'Неизвестно'}\n"
-            value += f"**Роль:** {role['source_role_name'] or 'Неизвестно'}\n"
-            value += f"**ID роли:** `{role['source_role_id']}`\n"
-            value += f"**Целевая роль:** {target_role.mention if target_role else 'Не найдена'}"
-            
-            embed.add_field(
-                name=f"🎯 {role['target_role_name'] or 'Без имени'}",
-                value=value,
-                inline=False
-            )
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        
-        # Логируем просмотр ролей
-        await Logger.log_to_channel(
-            interaction.guild,
-            f"**📋 Просмотр отслеживаемых ролей**\n"
-            f"• Администратор: {interaction.user.mention}\n"
-            f"• Количество ролей: {len(tracked_roles)}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.purple()
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка списка ролей: {e}")
-        await Logger.log_error(interaction.guild, str(e), "Команда /list_roles")
-        await interaction.followup.send(
-            f"❌ Ошибка: {str(e)}",
-            ephemeral=True
-        )
-
-# ========== КОМАНДА /STATS ==========
-@bot.tree.command(name="stats", description="Статистика сервера")
-@app_commands.checks.has_permissions(administrator=True)
-async def server_stats(interaction: discord.Interaction):
+async def server_stats_command(interaction: discord.Interaction):
     """Показать статистику сервера"""
-    
-    await interaction.response.defer(ephemeral=True)
-    
     try:
-        # Логируем команду
-        await Logger.log_command(interaction, "stats")
+        await Logger.log_command(interaction, "Статистика")
         
         guild = interaction.guild
         server_data = db.get_or_create_server(str(guild.id), guild.name)
@@ -1972,7 +1437,6 @@ async def server_stats(interaction: discord.Interaction):
             timestamp=datetime.now()
         )
         
-        # Основная информация
         total_members = len([m for m in guild.members if not m.bot])
         bot_count = len([m for m in guild.members if m.bot])
         
@@ -1984,18 +1448,23 @@ async def server_stats(interaction: discord.Interaction):
         
         embed.add_field(
             name="🔨 Баны",
-            value=f"Активных: {len(banned_users)}\nАвторазбан: через 10 мин",
+            value=f"Активных: {len(banned_users)}\nАвторазбан: 10 мин",
             inline=True
         )
         
-        # Отслеживаемые роли
+        servers_roles = {}
+        for role in tracked_roles:
+            server_id = role['source_server_id']
+            if server_id not in servers_roles:
+                servers_roles[server_id] = []
+            servers_roles[server_id].append(role)
+        
         embed.add_field(
             name=f"📡 Отслеживаемые роли",
-            value=f"Количество: {len(tracked_roles)}",
+            value=f"Серверов: {len(servers_roles)}\nРолей: {len(tracked_roles)}",
             inline=True
         )
         
-        # Каналы
         text_channels = len([c for c in guild.channels if isinstance(c, discord.TextChannel)])
         voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
         
@@ -2005,20 +1474,18 @@ async def server_stats(interaction: discord.Interaction):
             inline=True
         )
         
-        # Мониторинг
         embed.add_field(
             name="👁️ Мониторинг",
-            value="Статус: ✅ Активен\nПроверка: каждые 3 сек",
+            value="Статус: ✅\nПроверка: 3 сек",
             inline=True
         )
         
-        # Статус каналов
         settings = db.get_server_settings(server_data['id'])
         channel_status = "✅ Настроены" if settings else "❌ Не настроены"
         
         embed.add_field(
-            name="🔧 Статус каналов",
-            value=f"Каналы: {channel_status}\nДоступ: только через роли",
+            name="🔧 Статус",
+            value=f"Каналы: {channel_status}\nДоступ: через роли",
             inline=False
         )
         
@@ -2026,97 +1493,130 @@ async def server_stats(interaction: discord.Interaction):
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # Логируем просмотр статистики
-        await Logger.log_to_channel(
-            interaction.guild,
-            f"**📊 Просмотр статистики**\n"
-            f"• Администратор: {interaction.user.mention}\n"
-            f"• Участники: {total_members}\n"
-            f"• Отслеживаемые роли: {len(tracked_roles)}\n"
-            f"• Активные баны: {len(banned_users)}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.blue()
-        )
-        
     except Exception as e:
         logger.error(f"❌ Ошибка статистики: {e}")
-        await Logger.log_error(interaction.guild, str(e), "Команда /stats")
-        await interaction.followup.send(
+        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+
+# ========== КОМАНДА /SOUZ ==========
+@bot.tree.command(name="souz", description="Панель управления ботом")
+@app_commands.checks.has_permissions(administrator=True)
+async def souz_command(interaction: discord.Interaction):
+    """Главная панель управления ботом"""
+    
+    try:
+        # Создаем основной embed
+        embed = discord.Embed(
+            title="🤝 **ДОБРО ПОЖАЛОВАТЬ В СОЮЗНЫЙ БОТ!**",
+            description="Бот для управления доступом на основе ролей с других серверов",
+            color=discord.Color.gold()
+        )
+        
+        embed.add_field(
+            name="📋 **ОСНОВНЫЕ ФУНКЦИИ:**",
+            value="• Автоматическая проверка ролей каждые 3 секунды\n"
+                  "• Группировка ролей по серверам-источникам\n"
+                  "• Автобан при отсутствии требуемых ролей (10 минут)\n"
+                  "• Автоматическая настройка прав доступа к каналам\n"
+                  "• Две категории каналов: MAIN и HIGH\n"
+                  "• Подробное логирование всех действий",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔗 **ПРИГЛАСИТЬ БОТА НА СЕРВЕРЫ:**",
+            value=f"[📋 Пригласить с правами администратора](https://discord.com/api/oauth2/authorize?client_id=1463842572832211061&permissions=8&scope=bot%20applications.commands)\n"
+                  f"[👁️ Пригласить для просмотра ролей](https://discord.com/api/oauth2/authorize?client_id=1463842572832211061&permissions=268435456&scope=bot%20applications.commands)\n"
+                  f"**ID бота:** `1463842572832211061`",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚙️ **ЛОГИКА РАБОТЫ:**",
+            value="• Одна роль на сервер-источник\n"
+                  "• Все роли с одного сервера дают доступ к одной роли\n"
+                  "• Условие доступа: ИЛИ (хотя бы одна роль из сервера)\n"
+                  "• Пример: Роли 'Волк', 'Альфа', 'Вожак' с сервера 'Гильдия Волков' дают доступ к роли 'Гильдия Волков'",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📁 **СТРУКТУРА КАНАЛОВ:**",
+            value="**Категория MAIN:**\n"
+                  "• news - только чтение\n"
+                  "• flood - чтение/запись\n"
+                  "• tags - только чтение\n"
+                  "• media - чтение/запись + файлы\n"
+                  "• voice 1-4 - голосовые каналы\n\n"
+                  "**Категория HIGH:**\n"
+                  "• logs - логи бота (только админы)\n"
+                  "• high-flood - высокоуровневый чат (только админы)\n"
+                  "• high-voice - голосовой канал (только админы)",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="👑 **АДМИНСКИЕ РОЛИ:**",
+            value="• **Own** - владелец (красная роль)\n"
+                  "• **High** - высокоуровневый администратор (синяя роль)\n"
+                  "• Обе роли имеют полные права администратора",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🚀 **БЫСТРЫЙ СТАРТ:**",
+            value="1. Нажмите **'Настройка сервера'**\n"
+                  "2. Добавьте роли через **'Добавить роль'**\n"
+                  "3. Используйте **'Синхронизация'** для проверки всех пользователей\n"
+                  "4. Наслаждайтесь автоматическим управлением доступом!",
+            inline=False
+        )
+        
+        embed.set_footer(text="Для получения помощи обращайтесь к разработчику")
+        embed.set_thumbnail(url=bot.user.avatar.url if bot.user.avatar else None)
+        
+        # Отправляем embed с панелью управления
+        view = ControlPanelView()
+        await interaction.response.send_message(embed=embed, view=view)
+        
+        # Логируем команду
+        await Logger.log_command(interaction, "souz")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка команды souz: {e}")
+        await interaction.response.send_message(
             f"❌ Ошибка: {str(e)}",
             ephemeral=True
         )
 
-# ========== КОМАНДА /PING ==========
-@bot.tree.command(name="ping", description="Проверка задержки бота")
-async def ping_command(interaction: discord.Interaction):
-    """Проверить задержку бота"""
+# ========== СОБЫТИЯ БОТА ==========
+@bot.event
+async def on_ready():
+    """Событие при запуске бота"""
+    print(f'✅ Бот {bot.user} запущен!')
+    print(f'🆔 ID бота: {bot.user.id}')
+    print(f'📊 Серверов: {len(bot.guilds)}')
     
-    latency = round(bot.latency * 1000)
+    try:
+        synced = await bot.tree.sync()
+        print(f'🔄 Синхронизировано команд: {len(synced)}')
+    except Exception as e:
+        print(f'❌ Ошибка синхронизации: {e}')
     
-    embed = discord.Embed(
-        title="🏓 Понг!",
-        description=f"Задержка бота: **{latency}ms**",
-        color=discord.Color.green() if latency < 100 else discord.Color.orange() if latency < 300 else discord.Color.red()
-    )
-    
-    if latency < 100:
-        embed.add_field(name="Статус", value="✅ Отличное соединение", inline=False)
-    elif latency < 300:
-        embed.add_field(name="Статус", value="⚠️ Средняя задержка", inline=False)
-    else:
-        embed.add_field(name="Статус", value="❌ Высокая задержка", inline=False)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ========== ОБРАБОТКА ОШИБОК КОМАНД ==========
-@setup_server.error
-@add_server_role.error
-@remove_tracked_role.error
-@check_user.error
-@sync_all.error
-@unban_user.error
-@list_tracked_roles.error
-@server_stats.error
-async def command_error(interaction: discord.Interaction, error):
-    """Обработчик ошибок команд"""
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message(
-            "❌ У вас недостаточно прав для выполнения этой команды!",
-            ephemeral=True
-        )
-    else:
-        logger.error(f"❌ Ошибка команды: {error}")
-        await interaction.response.send_message(
-            f"❌ Произошла ошибка: {str(error)}",
-            ephemeral=True
-        )
-        
-        # Логируем ошибку в канал logs
-        if interaction.guild:
-            await Logger.log_error(
-                interaction.guild,
-                str(error),
-                f"Команда {interaction.command.name if interaction.command else 'unknown'}"
-            )
+    role_monitor.monitor_roles_task.start()
+    print('👁️ Мониторинг ролей запущен (каждые 3 секунды)')
 
 # ========== ЗАПУСК БОТА ==========
 if __name__ == "__main__":
-    print("🚀 Запуск Discord бота...")
-    print(f"📦 Версия discord.py: {discord.__version__}")
-    print("⚙️ Настройки:")
-    print(f"  • Все каналы закрыты при создании")
-    print(f"  • Проверка ролей: каждые 3 секунды")
-    print(f"  • Автобан: 10 минут")
-    print(f"  • Логирование: в канал 'logs'")
-    print(f"  • База данных: PostgreSQL (таблицы создаются автоматически)")
-    print(f"  • Доступ к каналам при добавлении роли:")
-    print(f"    - News: только чтение")
-    print(f"    - Flood: чтение и запись")
-    print(f"    - Tags: только чтение")
-    print(f"    - Media: чтение, запись, файлы")
-    print(f"    - Голосовые: подключение, голос")
-    print(f"  • Новые команды:")
-    print(f"    - /remove_role - удалить отслеживаемую роль")
+    print("=" * 50)
+    print("🚀 Запуск Союзного Бота")
+    print("=" * 50)
+    print("📋 Основные функции:")
+    print("  • Панель управления через /souz")
+    print("  • 8 кнопок для управления")
+    print("  • Две категории: MAIN и HIGH")
+    print("  • Роли: Own и High")
+    print("  • Группировка ролей по серверам")
+    print("=" * 50)
     
     try:
         bot.run(TOKEN)
