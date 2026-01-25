@@ -110,21 +110,23 @@ class Database:
             
         except Exception as e:
             logger.error(f"❌ Критическая ошибка подключения к БД: {e}")
-            sys.exit(1)
+            self.conn = None
     
     def execute(self, query, params=None, fetchone=False, fetchall=False, commit=True):
         """Выполнение SQL запроса"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к базе данных")
+            return None
+        
         try:
             cursor = self.conn.cursor()
             
             if self.use_sqlite:
                 query = query.replace('%s', '?')
-                query = query.replace('SERIAL', 'INTEGER PRIMARY KEY AUTOINCREMENT')
+                query = query.replace('SERIAL', 'INTEGER')
                 query = query.replace('VARCHAR', 'TEXT')
                 query = query.replace('BOOLEAN', 'INTEGER')
-                query = query.replace('TIMESTAMP DEFAULT CURRENT_TIMESTAMP', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
-                if 'ON CONFLICT' in query:
-                    query = query.split('ON CONFLICT')[0]
+                query = query.replace('TIMESTAMP DEFAULT CURRENT_TIMESTAMP', 'TIMESTAMP')
             
             cursor.execute(query, params or ())
             
@@ -142,113 +144,119 @@ class Database:
             return result
         except Exception as e:
             logger.error(f"❌ Ошибка SQL: {e}")
-            raise
+            logger.error(f"Запрос: {query[:100]}...")
+            return None
     
     def init_database(self):
-        """Инициализация таблиц БД"""
-        logger.info("🔄 Создание таблиц в базе данных...")
+        """Инициализация таблиц БД (если не существуют)"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД для инициализации")
+            return
         
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS servers (
-                id SERIAL PRIMARY KEY,
-                discord_id VARCHAR(255) UNIQUE NOT NULL,
-                name VARCHAR(255) NOT NULL,
-                is_setup BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        logger.info("🔄 Проверка таблиц в базе данных...")
         
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS server_settings (
-                id SERIAL PRIMARY KEY,
-                server_id INTEGER NOT NULL,
-                admin_role_1_id VARCHAR(255),
-                admin_role_2_id VARCHAR(255),
-                news_channel_id VARCHAR(255),
-                flood_channel_id VARCHAR(255),
-                tags_channel_id VARCHAR(255),
-                media_channel_id VARCHAR(255),
-                logs_channel_id VARCHAR(255),
-                high_flood_channel_id VARCHAR(255),
-                voice_channel_ids TEXT,
-                high_voice_channel_id VARCHAR(255),
-                main_category_id VARCHAR(255),
-                high_category_id VARCHAR(255),
-                UNIQUE(server_id)
-            )
-        ''')
-        
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS tracked_roles (
-                id SERIAL PRIMARY KEY,
-                server_id INTEGER NOT NULL,
-                source_server_id VARCHAR(255) NOT NULL,
-                source_server_name VARCHAR(255),
-                source_role_id VARCHAR(255) NOT NULL,
-                source_role_name VARCHAR(255),
-                target_role_id VARCHAR(255),
-                target_role_name VARCHAR(255),
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        if self.use_sqlite:
+        try:
+            # Таблица серверов
             self.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_roles_unique 
-                ON tracked_roles (server_id, source_server_id, source_role_id)
+                CREATE TABLE IF NOT EXISTS servers (
+                    id SERIAL PRIMARY KEY,
+                    discord_id VARCHAR(255) UNIQUE NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    is_setup BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
             ''')
-        else:
+            
+            # Таблица настроек сервера
             self.execute('''
-                ALTER TABLE tracked_roles 
-                ADD CONSTRAINT unique_tracked_role 
-                UNIQUE (server_id, source_server_id, source_role_id)
+                CREATE TABLE IF NOT EXISTS server_settings (
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL,
+                    admin_role_1_id VARCHAR(255),
+                    admin_role_2_id VARCHAR(255),
+                    news_channel_id VARCHAR(255),
+                    flood_channel_id VARCHAR(255),
+                    tags_channel_id VARCHAR(255),
+                    media_channel_id VARCHAR(255),
+                    logs_channel_id VARCHAR(255),
+                    high_flood_channel_id VARCHAR(255),
+                    voice_channel_ids TEXT,
+                    high_voice_channel_id VARCHAR(255),
+                    main_category_id VARCHAR(255),
+                    high_category_id VARCHAR(255),
+                    UNIQUE(server_id)
+                )
             ''')
-        
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS user_roles (
-                id SERIAL PRIMARY KEY,
-                server_id INTEGER NOT NULL,
-                user_id VARCHAR(255) NOT NULL,
-                username VARCHAR(255),
-                tracked_role_id INTEGER NOT NULL,
-                has_role BOOLEAN DEFAULT FALSE,
-                last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        if self.use_sqlite:
+            
+            # Таблица отслеживаемых ролей
             self.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_user_roles_unique 
-                ON user_roles (server_id, user_id, tracked_role_id)
+                CREATE TABLE IF NOT EXISTS tracked_roles (
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL,
+                    source_server_id VARCHAR(255) NOT NULL,
+                    source_server_name VARCHAR(255),
+                    source_role_id VARCHAR(255) NOT NULL,
+                    source_role_name VARCHAR(255),
+                    target_role_id VARCHAR(255),
+                    target_role_name VARCHAR(255),
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(server_id, source_server_id, source_role_id)
+                )
             ''')
-        
-        self.execute('''
-            CREATE TABLE IF NOT EXISTS banned_users (
-                id SERIAL PRIMARY KEY,
-                server_id INTEGER NOT NULL,
-                user_id VARCHAR(255) NOT NULL,
-                username VARCHAR(255) NOT NULL,
-                ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                unban_time TIMESTAMP,
-                ban_duration INTEGER DEFAULT 600,
-                reason TEXT,
-                is_unbanned BOOLEAN DEFAULT FALSE
-            )
-        ''')
-        
-        if self.use_sqlite:
+            
+            # Таблица пользователей с ролями
             self.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_banned_users_unique 
-                ON banned_users (server_id, user_id)
+                CREATE TABLE IF NOT EXISTS user_roles (
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    username VARCHAR(255),
+                    tracked_role_id INTEGER NOT NULL,
+                    has_role BOOLEAN DEFAULT FALSE,
+                    last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(server_id, user_id, tracked_role_id)
+                )
             ''')
-        
-        logger.info("✅ Таблицы базы данных успешно созданы/проверены")
+            
+            # Таблица забаненных пользователей
+            self.execute('''
+                CREATE TABLE IF NOT EXISTS banned_users (
+                    id SERIAL PRIMARY KEY,
+                    server_id INTEGER NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    username VARCHAR(255) NOT NULL,
+                    ban_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    unban_time TIMESTAMP,
+                    ban_duration INTEGER DEFAULT 600,
+                    reason TEXT,
+                    is_unbanned BOOLEAN DEFAULT FALSE,
+                    UNIQUE(server_id, user_id)
+                )
+            ''')
+            
+            logger.info("✅ Таблицы базы данных успешно проверены")
+            
+            # Проверяем соединение
+            test_result = self.execute('SELECT 1 as test', fetchone=True)
+            if test_result:
+                db_type = "SQLite" if self.use_sqlite else "PostgreSQL"
+                logger.info(f"✅ Тест подключения к {db_type} пройден")
+            else:
+                logger.warning("⚠️ Тест подключения к БД не пройден")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки таблиц: {e}")
+            # Не выходим из программы, просто логируем ошибку
     
     # ========== МЕТОДЫ ДЛЯ СЕРВЕРОВ ==========
     
     def get_or_create_server(self, discord_id: str, name: str) -> dict:
         """Получить или создать сервер в БД"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return None
+        
         result = self.execute(
             'SELECT * FROM servers WHERE discord_id = %s',
             (discord_id,),
@@ -259,17 +267,22 @@ class Database:
             return dict(result)
         
         try:
-            self.execute(
-                '''INSERT INTO servers (discord_id, name) 
-                   VALUES (%s, %s)''',
-                (discord_id, name)
-            )
-        except:
-            self.execute(
-                '''INSERT OR IGNORE INTO servers (discord_id, name) 
-                   VALUES (%s, %s)''',
-                (discord_id, name)
-            )
+            if self.use_sqlite:
+                self.execute(
+                    '''INSERT OR IGNORE INTO servers (discord_id, name) 
+                       VALUES (%s, %s)''',
+                    (discord_id, name)
+                )
+            else:
+                self.execute(
+                    '''INSERT INTO servers (discord_id, name) 
+                       VALUES (%s, %s)
+                       ON CONFLICT (discord_id) DO NOTHING''',
+                    (discord_id, name)
+                )
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания сервера: {e}")
+            return None
         
         result = self.execute(
             'SELECT * FROM servers WHERE discord_id = %s',
@@ -280,6 +293,10 @@ class Database:
     
     def mark_server_setup(self, discord_id: str):
         """Отметить сервер как настроенный"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return
+        
         self.execute(
             'UPDATE servers SET is_setup = TRUE WHERE discord_id = %s',
             (discord_id,)
@@ -289,33 +306,82 @@ class Database:
     
     def save_server_settings(self, server_id: int, settings: dict):
         """Сохранить настройки сервера"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return
+        
         voice_channel_ids = json.dumps(settings.get('voice_channel_ids', []))
         
-        self.execute('''
-            INSERT INTO server_settings 
-            (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
-             flood_channel_id, tags_channel_id, media_channel_id, 
-             logs_channel_id, high_flood_channel_id, voice_channel_ids,
-             high_voice_channel_id, main_category_id, high_category_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ''', (
-            server_id,
-            settings.get('admin_role_1_id'),
-            settings.get('admin_role_2_id'),
-            settings.get('news_channel_id'),
-            settings.get('flood_channel_id'),
-            settings.get('tags_channel_id'),
-            settings.get('media_channel_id'),
-            settings.get('logs_channel_id'),
-            settings.get('high_flood_channel_id'),
-            voice_channel_ids,
-            settings.get('high_voice_channel_id'),
-            settings.get('main_category_id'),
-            settings.get('high_category_id')
-        ))
+        try:
+            if self.use_sqlite:
+                self.execute('''
+                    INSERT OR REPLACE INTO server_settings 
+                    (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
+                     flood_channel_id, tags_channel_id, media_channel_id, 
+                     logs_channel_id, high_flood_channel_id, voice_channel_ids,
+                     high_voice_channel_id, main_category_id, high_category_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (
+                    server_id,
+                    settings.get('admin_role_1_id'),
+                    settings.get('admin_role_2_id'),
+                    settings.get('news_channel_id'),
+                    settings.get('flood_channel_id'),
+                    settings.get('tags_channel_id'),
+                    settings.get('media_channel_id'),
+                    settings.get('logs_channel_id'),
+                    settings.get('high_flood_channel_id'),
+                    voice_channel_ids,
+                    settings.get('high_voice_channel_id'),
+                    settings.get('main_category_id'),
+                    settings.get('high_category_id')
+                ))
+            else:
+                self.execute('''
+                    INSERT INTO server_settings 
+                    (server_id, admin_role_1_id, admin_role_2_id, news_channel_id, 
+                     flood_channel_id, tags_channel_id, media_channel_id, 
+                     logs_channel_id, high_flood_channel_id, voice_channel_ids,
+                     high_voice_channel_id, main_category_id, high_category_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (server_id) 
+                    DO UPDATE SET 
+                        admin_role_1_id = EXCLUDED.admin_role_1_id,
+                        admin_role_2_id = EXCLUDED.admin_role_2_id,
+                        news_channel_id = EXCLUDED.news_channel_id,
+                        flood_channel_id = EXCLUDED.flood_channel_id,
+                        tags_channel_id = EXCLUDED.tags_channel_id,
+                        media_channel_id = EXCLUDED.media_channel_id,
+                        logs_channel_id = EXCLUDED.logs_channel_id,
+                        high_flood_channel_id = EXCLUDED.high_flood_channel_id,
+                        voice_channel_ids = EXCLUDED.voice_channel_ids,
+                        high_voice_channel_id = EXCLUDED.high_voice_channel_id,
+                        main_category_id = EXCLUDED.main_category_id,
+                        high_category_id = EXCLUDED.high_category_id
+                ''', (
+                    server_id,
+                    settings.get('admin_role_1_id'),
+                    settings.get('admin_role_2_id'),
+                    settings.get('news_channel_id'),
+                    settings.get('flood_channel_id'),
+                    settings.get('tags_channel_id'),
+                    settings.get('media_channel_id'),
+                    settings.get('logs_channel_id'),
+                    settings.get('high_flood_channel_id'),
+                    voice_channel_ids,
+                    settings.get('high_voice_channel_id'),
+                    settings.get('main_category_id'),
+                    settings.get('high_category_id')
+                ))
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения настроек: {e}")
     
     def get_server_settings(self, server_id: int) -> dict:
         """Получить настройки сервера"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return {}
+        
         result = self.execute(
             'SELECT * FROM server_settings WHERE server_id = %s',
             (server_id,),
@@ -328,6 +394,11 @@ class Database:
     def add_tracked_role(self, server_id: int, source_server_id: str, source_role_id: str,
                         source_server_name: str = None, source_role_name: str = None) -> int:
         """Добавить отслеживаемую роль"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return None
+        
+        # Сначала пробуем найти существующую
         result = self.execute(
             '''SELECT id FROM tracked_roles 
                WHERE server_id = %s AND source_server_id = %s AND source_role_id = %s''',
@@ -336,17 +407,23 @@ class Database:
         )
         
         if result:
+            # Активируем существующую
             self.execute(
                 'UPDATE tracked_roles SET is_active = TRUE WHERE id = %s',
                 (result['id'],)
             )
             return result['id']
         
-        self.execute('''
-            INSERT INTO tracked_roles 
-            (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
-            VALUES (%s, %s, %s, %s, %s)
-        ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
+        # Создаем новую
+        try:
+            self.execute('''
+                INSERT INTO tracked_roles 
+                (server_id, source_server_id, source_role_id, source_server_name, source_role_name)
+                VALUES (%s, %s, %s, %s, %s)
+            ''', (server_id, source_server_id, source_role_id, source_server_name, source_role_name))
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления роли: {e}")
+            return None
         
         result = self.execute(
             '''SELECT id FROM tracked_roles 
@@ -359,6 +436,10 @@ class Database:
     
     def update_target_role(self, tracked_role_id: int, target_role_id: str, target_role_name: str):
         """Обновить целевую роль"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return
+        
         self.execute('''
             UPDATE tracked_roles 
             SET target_role_id = %s, target_role_name = %s 
@@ -367,6 +448,10 @@ class Database:
     
     def get_tracked_roles(self, server_id: int) -> list:
         """Получить все отслеживаемые роли сервера"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return []
+        
         results = self.execute(
             'SELECT * FROM tracked_roles WHERE server_id = %s AND is_active = TRUE',
             (server_id,),
@@ -376,6 +461,10 @@ class Database:
     
     def deactivate_tracked_role(self, tracked_role_id: int):
         """Деактивировать отслеживаемую роль"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return
+        
         self.execute(
             'UPDATE tracked_roles SET is_active = FALSE WHERE id = %s',
             (tracked_role_id,)
@@ -385,13 +474,35 @@ class Database:
     
     def ban_user(self, server_id: int, user_id: str, username: str, reason: str = None) -> int:
         """Забанить пользователя"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return None
+        
         unban_time = datetime.now() + timedelta(seconds=600)
         
-        self.execute('''
-            INSERT OR REPLACE INTO banned_users 
-            (server_id, user_id, username, unban_time, reason)
-            VALUES (%s, %s, %s, %s, %s)
-        ''', (server_id, user_id, username, unban_time.isoformat(), reason))
+        try:
+            if self.use_sqlite:
+                self.execute('''
+                    INSERT OR REPLACE INTO banned_users 
+                    (server_id, user_id, username, unban_time, reason)
+                    VALUES (%s, %s, %s, %s, %s)
+                ''', (server_id, user_id, username, unban_time.isoformat(), reason))
+            else:
+                self.execute('''
+                    INSERT INTO banned_users 
+                    (server_id, user_id, username, unban_time, reason)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (server_id, user_id) 
+                    DO UPDATE SET 
+                        username = EXCLUDED.username,
+                        unban_time = EXCLUDED.unban_time,
+                        reason = EXCLUDED.reason,
+                        ban_time = CURRENT_TIMESTAMP,
+                        is_unbanned = FALSE
+                ''', (server_id, user_id, username, unban_time.isoformat(), reason))
+        except Exception as e:
+            logger.error(f"❌ Ошибка бана: {e}")
+            return None
         
         result = self.execute(
             'SELECT id FROM banned_users WHERE server_id = %s AND user_id = %s',
@@ -403,6 +514,10 @@ class Database:
     
     def unban_user(self, server_id: int, user_id: str):
         """Разбанить пользователя"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return
+        
         self.execute('''
             UPDATE banned_users 
             SET is_unbanned = TRUE, unban_time = CURRENT_TIMESTAMP
@@ -411,6 +526,10 @@ class Database:
     
     def get_banned_users(self, server_id: int) -> list:
         """Получить забаненных пользователей"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return []
+        
         results = self.execute(
             'SELECT * FROM banned_users WHERE server_id = %s AND is_unbanned = FALSE',
             (server_id,),
@@ -420,6 +539,10 @@ class Database:
     
     def get_users_to_unban(self) -> list:
         """Получить пользователей для авторазбана"""
+        if not self.conn:
+            logger.error("❌ Нет подключения к БД")
+            return []
+        
         results = self.execute(
             '''SELECT * FROM banned_users 
                WHERE is_unbanned = FALSE AND unban_time <= %s''',
@@ -434,8 +557,11 @@ try:
     logger.info("✅ База данных инициализирована")
 except Exception as e:
     logger.error(f"❌ Не удалось инициализировать базу данных: {e}")
-    sys.exit(1)
+    logger.warning("⚠️ Продолжаю работу без базы данных. Некоторые функции могут не работать.")
+    # Создаем пустой объект
+    db = None
 
+# ========== ПАНЕЛЬ УПРАВЛЕНИЯ ==========
 class ControlPanelView(discord.ui.View):
     """Панель управления ботом"""
     def __init__(self):
@@ -520,7 +646,6 @@ class AddRoleModal(discord.ui.Modal, title="Добавить отслежива�
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        # Модальные окна уже обрабатывают response, так что не нужно defer
         await add_server_role_command(interaction, self.server_id.value, self.role_id.value)
 
 class UnbanModal(discord.ui.Modal, title="Разблокировать пользователя"):
@@ -555,7 +680,7 @@ class ChannelPermissions:
         """Добавить роль с нужными правами ко всем каналам"""
         if not settings:
             logger.warning(f"⚠️ Нет настроек сервера для настройки прав роли {role.name}")
-            return
+            return 0
         
         configured_count = 0
         
@@ -634,7 +759,13 @@ class Logger:
     async def log_to_channel(guild: discord.Guild, message: str, color: discord.Color = discord.Color.blue()):
         """Отправить лог в канал logs"""
         try:
+            if not db or not db.conn:
+                return
+            
             server_data = db.get_or_create_server(str(guild.id), guild.name)
+            if not server_data:
+                return
+            
             settings = db.get_server_settings(server_data['id'])
             
             logs_channel_id = settings.get('logs_channel_id')
@@ -659,54 +790,66 @@ class Logger:
     @staticmethod
     async def log_command(interaction: discord.Interaction, command: str):
         """Логирование команды"""
-        await Logger.log_to_channel(
-            interaction.guild,
-            f"**Команда выполнена**\n"
-            f"• Команда: `{command}`\n"
-            f"• Пользователь: {interaction.user.mention}\n"
-            f"• Канал: {interaction.channel.mention}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.green()
-        )
+        try:
+            await Logger.log_to_channel(
+                interaction.guild,
+                f"**Команда выполнена**\n"
+                f"• Команда: `{command}`\n"
+                f"• Пользователь: {interaction.user.mention}\n"
+                f"• Канал: {interaction.channel.mention}\n"
+                f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+                discord.Color.green()
+            )
+        except:
+            pass
     
     @staticmethod
     async def log_role_action(guild: discord.Guild, user: discord.Member, action: str, role: discord.Role, reason: str = ""):
         """Логирование действий с ролями"""
-        await Logger.log_to_channel(
-            guild,
-            f"**{action}**\n"
-            f"• Пользователь: {user.mention}\n"
-            f"• Роль: {role.mention}\n"
-            f"• Причина: {reason}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.blue() if "Добавлена" in action else discord.Color.orange()
-        )
+        try:
+            await Logger.log_to_channel(
+                guild,
+                f"**{action}**\n"
+                f"• Пользователь: {user.mention}\n"
+                f"• Роль: {role.mention}\n"
+                f"• Причина: {reason}\n"
+                f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+                discord.Color.blue() if "Добавлена" in action else discord.Color.orange()
+            )
+        except:
+            pass
     
     @staticmethod
     async def log_ban(guild: discord.Guild, user: discord.Member, reason: str, duration: int = 600):
         """Логирование бана"""
-        unban_time = datetime.now() + timedelta(seconds=duration)
-        await Logger.log_to_channel(
-            guild,
-            f"**🔨 Пользователь забанен**\n"
-            f"• Пользователь: {user.mention}\n"
-            f"• Причина: {reason}\n"
-            f"• Длительность: 10 минут\n"
-            f"• Разбан: {unban_time.strftime('%H:%M:%S')}",
-            discord.Color.red()
-        )
+        try:
+            unban_time = datetime.now() + timedelta(seconds=duration)
+            await Logger.log_to_channel(
+                guild,
+                f"**🔨 Пользователь забанен**\n"
+                f"• Пользователь: {user.mention}\n"
+                f"• Причина: {reason}\n"
+                f"• Длительность: 10 минут\n"
+                f"• Разбан: {unban_time.strftime('%H:%M:%S')}",
+                discord.Color.red()
+            )
+        except:
+            pass
     
     @staticmethod
     async def log_unban(guild: discord.Guild, user_id: str, username: str, reason: str = ""):
         """Логирование разбана"""
-        await Logger.log_to_channel(
-            guild,
-            f"**🔓 Пользователь разбанен**\n"
-            f"• Пользователь: `{username}`\n"
-            f"• Причина: {reason}\n"
-            f"• Время: {datetime.now().strftime('%H:%M:%S')}",
-            discord.Color.green()
-        )
+        try:
+            await Logger.log_to_channel(
+                guild,
+                f"**🔓 Пользователь разбанен**\n"
+                f"• Пользователь: `{username}`\n"
+                f"• Причина: {reason}\n"
+                f"• Время: {datetime.now().strftime('%H:%M:%S')}",
+                discord.Color.green()
+            )
+        except:
+            pass
 
 # ========== КЛАСС ДЛЯ РОЛЕЙ И БАНОВ ==========
 class RoleMonitor:
@@ -720,7 +863,13 @@ class RoleMonitor:
             if not user:
                 return False, []
             
+            if not db or not db.conn:
+                return False, []
+            
             server_data = db.get_or_create_server(str(guild.id), guild.name)
+            if not server_data:
+                return False, []
+            
             tracked_roles = db.get_tracked_roles(server_data['id'])
             
             servers_roles = {}
@@ -770,7 +919,13 @@ class RoleMonitor:
             if not user:
                 return False
             
+            if not db or not db.conn:
+                return False
+            
             server_data = db.get_or_create_server(str(guild.id), guild.name)
+            if not server_data:
+                return False
+            
             tracked_roles = db.get_tracked_roles(server_data['id'])
             
             servers_roles = {}
@@ -857,7 +1012,14 @@ class RoleMonitor:
     async def ban_user(self, guild: discord.Guild, user_id: int, username: str, reason: str):
         """Забанить пользователя на 10 минут"""
         try:
+            if not db or not db.conn:
+                logger.error("❌ Нет подключения к БД для бана")
+                return False
+            
             server_data = db.get_or_create_server(str(guild.id), guild.name)
+            if not server_data:
+                return False
+            
             db.ban_user(server_data['id'], str(user_id), username, reason)
             
             user = guild.get_member(user_id)
@@ -878,6 +1040,9 @@ class RoleMonitor:
     async def auto_unban_users(self):
         """Автоматический разбан пользователей"""
         try:
+            if not db or not db.conn:
+                return
+            
             users_to_unban = db.get_users_to_unban()
             
             for banned in users_to_unban:
@@ -900,9 +1065,15 @@ class RoleMonitor:
         try:
             await self.auto_unban_users()
             
+            if not db or not db.conn:
+                return
+            
             for guild in self.bot.guilds:
                 try:
                     server_data = db.get_or_create_server(str(guild.id), guild.name)
+                    if not server_data:
+                        continue
+                    
                     tracked_roles = db.get_tracked_roles(server_data['id'])
                     
                     if not tracked_roles:
@@ -935,7 +1106,19 @@ async def setup_server_command(interaction: discord.Interaction):
         # ОТПРАВЛЯЕМ ВРЕМЕННОЕ СООБЩЕНИЕ СРАЗУ
         await interaction.followup.send("🔄 Начинаю настройку сервера...", ephemeral=True)
         
+        if not db or not db.conn:
+            await interaction.edit_original_response(
+                content="❌ Ошибка базы данных. Проверьте подключение к PostgreSQL."
+            )
+            return
+        
         server_data = db.get_or_create_server(str(guild.id), guild.name)
+        if not server_data:
+            await interaction.edit_original_response(
+                content="❌ Не удалось создать запись сервера в базе данных"
+            )
+            return
+        
         logger.info(f"🔧 Настройка сервера: {guild.name}")
         
         # 1. СОЗДАНИЕ АДМИНСКИХ РОЛЕЙ
@@ -1163,10 +1346,17 @@ async def setup_server_command(interaction: discord.Interaction):
 
 async def add_server_role_command(interaction: discord.Interaction, source_server_id: str, source_role_id: str):
     """Добавить отслеживаемую роль"""
-    guild = interaction.guild
-    
     try:
+        if not db or not db.conn:
+            await interaction.followup.send(
+                "❌ Ошибка базы данных. Проверьте подключение к PostgreSQL.",
+                ephemeral=True
+            )
+            return
+        
         await Logger.log_command(interaction, "Добавить роль")
+        
+        guild = interaction.guild
         
         if not source_server_id.isdigit() or not source_role_id.isdigit():
             await interaction.followup.send("❌ ID должны быть числовыми", ephemeral=True)
@@ -1183,6 +1373,9 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
             return
         
         server_data = db.get_or_create_server(str(guild.id), guild.name)
+        if not server_data:
+            await interaction.followup.send("❌ Ошибка сервера в базе данных", ephemeral=True)
+            return
         
         tracked_roles = db.get_tracked_roles(server_data['id'])
         for role in tracked_roles:
@@ -1239,7 +1432,8 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
             source_role.name
         )
         
-        db.update_target_role(tracked_id, str(target_role.id), target_role.name)
+        if tracked_id:
+            db.update_target_role(tracked_id, str(target_role.id), target_role.name)
         
         embed = discord.Embed(
             title="✅ Роль добавлена для отслеживания",
@@ -1290,15 +1484,27 @@ async def add_server_role_command(interaction: discord.Interaction, source_serve
         
     except Exception as e:
         logger.error(f"❌ Ошибка добавления роли: {e}")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:200]}", ephemeral=True)
 
 async def remove_tracked_role_command(interaction: discord.Interaction):
     """Удалить отслеживаемую роль"""
     try:
+        if not db or not db.conn:
+            await interaction.followup.send(
+                "❌ Ошибка базы данных",
+                ephemeral=True
+            )
+            return
+        
         await Logger.log_command(interaction, "Удалить роль")
         
         guild = interaction.guild
         server_data = db.get_or_create_server(str(guild.id), guild.name)
+        
+        if not server_data:
+            await interaction.followup.send("❌ Ошибка сервера в БД", ephemeral=True)
+            return
+        
         tracked_roles = db.get_tracked_roles(server_data['id'])
         
         if not tracked_roles:
@@ -1314,7 +1520,7 @@ async def remove_tracked_role_command(interaction: discord.Interaction):
         
         embed = discord.Embed(
             title="🗑️ Удаление отслеживаемой роли",
-            description="Выберите роль из списка ниже:",
+            description="Для удаления роли обратитесь к администратору бота",
             color=discord.Color.orange()
         )
         
@@ -1335,14 +1541,26 @@ async def remove_tracked_role_command(interaction: discord.Interaction):
         
     except Exception as e:
         logger.error(f"❌ Ошибка удаления роли: {e}")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:200]}", ephemeral=True)
 
 async def list_tracked_roles_command(interaction: discord.Interaction):
     """Показать все отслеживаемые роли"""
     try:
+        if not db or not db.conn:
+            await interaction.followup.send(
+                "❌ Ошибка базы данных",
+                ephemeral=True
+            )
+            return
+        
         await Logger.log_command(interaction, "Список ролей")
         
         server_data = db.get_or_create_server(str(interaction.guild.id), interaction.guild.name)
+        
+        if not server_data:
+            await interaction.followup.send("❌ Ошибка сервера в БД", ephemeral=True)
+            return
+        
         tracked_roles = db.get_tracked_roles(server_data['id'])
         
         if not tracked_roles:
@@ -1386,14 +1604,27 @@ async def list_tracked_roles_command(interaction: discord.Interaction):
         
     except Exception as e:
         logger.error(f"❌ Ошибка списка ролей: {e}")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:200]}", ephemeral=True)
 
 async def sync_all_command(interaction: discord.Interaction):
     """Синхронизировать всех пользователей"""
     try:
+        if not db or not db.conn:
+            await interaction.followup.send(
+                "❌ Ошибка базы данных",
+                ephemeral=True
+            )
+            return
+        
         await Logger.log_command(interaction, "Синхронизация")
         
         guild = interaction.guild
+        server_data = db.get_or_create_server(str(guild.id), guild.name)
+        
+        if not server_data:
+            await interaction.followup.send("❌ Ошибка сервера в БД", ephemeral=True)
+            return
+        
         members = [m for m in guild.members if not m.bot]
         
         await interaction.followup.send(f"🔄 Начинаю синхронизацию {len(members)} пользователей...", ephemeral=True)
@@ -1407,7 +1638,6 @@ async def sync_all_command(interaction: discord.Interaction):
             if await role_monitor.sync_user_roles(guild, member.id):
                 updated += 1
             
-            server_data = db.get_or_create_server(str(guild.id), guild.name)
             banned_users = db.get_banned_users(server_data['id'])
             if member.id in [int(b['user_id']) for b in banned_users]:
                 banned += 1
@@ -1425,15 +1655,22 @@ async def sync_all_command(interaction: discord.Interaction):
             color=discord.Color.green()
         )
         
-        await interaction.edit_original_response(embed=embed)
+        await interaction.edit_original_response(content=None, embed=embed)
         
     except Exception as e:
         logger.error(f"❌ Ошибка синхронизации: {e}")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:200]}", ephemeral=True)
 
 async def unban_user_command(interaction: discord.Interaction, user_id: str):
     """Разбанить пользователя"""
     try:
+        if not db or not db.conn:
+            await interaction.followup.send(
+                "❌ Ошибка базы данных",
+                ephemeral=True
+            )
+            return
+        
         await Logger.log_command(interaction, "Разбан")
         
         if not user_id.isdigit():
@@ -1444,7 +1681,8 @@ async def unban_user_command(interaction: discord.Interaction, user_id: str):
         await interaction.guild.unban(user, reason=f"Разбан администратором {interaction.user}")
         
         server_data = db.get_or_create_server(str(interaction.guild.id), interaction.guild.name)
-        db.unban_user(server_data['id'], user_id)
+        if server_data:
+            db.unban_user(server_data['id'], user_id)
         
         embed = discord.Embed(
             title="🔓 Пользователь разблокирован",
@@ -1465,15 +1703,27 @@ async def unban_user_command(interaction: discord.Interaction, user_id: str):
         await interaction.followup.send("❌ Пользователь не найден или не забанен", ephemeral=True)
     except Exception as e:
         logger.error(f"❌ Ошибка разбана: {e}")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:200]}", ephemeral=True)
 
 async def server_stats_command(interaction: discord.Interaction):
     """Показать статистику сервера"""
     try:
+        if not db or not db.conn:
+            await interaction.followup.send(
+                "❌ Ошибка базы данных",
+                ephemeral=True
+            )
+            return
+        
         await Logger.log_command(interaction, "Статистика")
         
         guild = interaction.guild
         server_data = db.get_or_create_server(str(guild.id), guild.name)
+        
+        if not server_data:
+            await interaction.followup.send("❌ Ошибка сервера в БД", ephemeral=True)
+            return
+        
         tracked_roles = db.get_tracked_roles(server_data['id'])
         banned_users = db.get_banned_users(server_data['id'])
         
@@ -1541,7 +1791,7 @@ async def server_stats_command(interaction: discord.Interaction):
         
     except Exception as e:
         logger.error(f"❌ Ошибка статистики: {e}")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:200]}", ephemeral=True)
 
 # ========== КОМАНДА /SOUZ ==========
 @bot.tree.command(name="souz", description="Панель управления ботом")
@@ -1666,8 +1916,12 @@ async def on_ready():
     except Exception as e:
         print(f'❌ Ошибка синхронизации: {e}')
     
-    role_monitor.monitor_roles_task.start()
-    print('👁️ Мониторинг ролей запущен (каждые 3 секунды)')
+    # Запускаем мониторинг только если БД работает
+    if db and db.conn:
+        role_monitor.monitor_roles_task.start()
+        print('👁️ Мониторинг ролей запущен (каждые 3 секунды)')
+    else:
+        print('⚠️ Мониторинг ролей отключен (проблемы с БД)')
 
 # ========== ЗАПУСК БОТА ==========
 if __name__ == "__main__":
